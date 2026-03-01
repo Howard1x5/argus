@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus-ir"
+version = "0.1.0"
+description = "Automated Response & Guided Unified Security - CLI-based IR analysis pipeline"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Clint Howard"}
+]
+keywords = ["incident-response", "forensics", "dfir", "security", "analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+    # Core
+    "pyyaml>=6.0",
+    "click>=8.0",
+
+    # Data processing
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "openpyxl>=3.1",
+
+    # Evidence parsing
+    "python-evtx>=0.8",
+    "regipy>=4.0",
+
+    # LLM
+    "anthropic>=0.18",
+
+    # Report generation
+    "weasyprint>=60.0",
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "pygments>=2.17",
+
+    # IOC enrichment
+    "requests>=2.31",
+    "aiohttp>=3.9",
+
+    # Utilities
+    "rich>=13.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+argus = "argus.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Howard1x5/argus"
+Repository = "https://github.com/Howard1x5/argus"
+Issues = "https://github.com/Howard1x5/argus/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+argus = ["templates/*", "assets/*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true

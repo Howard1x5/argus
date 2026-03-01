@@ -1,0 +1,149 @@
+"""Phase 3: DEEP ANALYSIS - Agent Army Analysis.
+
+Runs 9 domain-specific LLM agents plus a master synthesizer
+to perform deep forensic analysis of the evidence.
+"""
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import click
+import pyarrow.parquet as pq
+
+from argus.phases.phase0_init import write_completion_marker
+from argus.phases.phase2_triage import check_phase_complete
+
+
+def load_parquet_events(case_path: Path) -> list[dict]:
+    """Load all events from Parquet files."""
+    parsed_dir = case_path / "parsed"
+    events = []
+
+    for parquet_file in parsed_dir.glob("*.parquet"):
+        try:
+            table = pq.read_table(parquet_file)
+            df_events = table.to_pylist()
+            for event in df_events:
+                event["_source_parquet"] = parquet_file.name
+            events.extend(df_events)
+        except Exception as e:
+            click.echo(f"  Warning: Failed to read {parquet_file.name}: {e}")
+
+    return events
+
+
+def load_hypotheses(case_path: Path) -> list[dict]:
+    """Load hypotheses from Phase 2."""
+    hypotheses_file = case_path / "triage" / "hypotheses.json"
+    if hypotheses_file.exists():
+        with open(hypotheses_file) as f:
+            data = json.load(f)
+            return data.get("hypotheses", [])
+    return []
+
+
+def load_triage_findings(case_path: Path) -> list[dict]:
+    """Load triage findings from Phase 2."""
+    findings_file = case_path / "triage" / "merged_findings.json"
+    if findings_file.exists():
+        with open(findings_file) as f:
+            data = json.load(f)
+            return data.get("findings", [])
+    return []
+
+
+def run_analysis(case_path_str: str) -> bool:
+    """Run Phase 3: Deep Analysis.
+
+    Args:
+        case_path_str: Path to case directory
+
+    Returns:
+        True if successful
+    """
+    case_path = Path(case_path_str).resolve()
+    
+    # Verify case exists
+    if not (case_path / "argus.yaml").exists():
+        click.echo("Error: Not a valid ARGUS case directory", err=True)
+        return False
+
+    # Check if Phase 2 is complete
+    if not check_phase_complete(case_path, 2):
+        click.echo("Phase 2 not complete. Running triage first...")
+        from argus.phases.phase2_triage import run_triage
+        if not run_triage(case_path_str):
+            click.echo("Triage failed. Cannot proceed with analysis.")
+            return False
+
+    analysis_dir = case_path / "analysis"
+    analysis_dir.mkdir(exist_ok=True)
+
+    click.echo(f"\nPhase 3: DEEP ANALYSIS")
+    click.echo("=" * 40)
+
+    # Load data
+    click.echo("\nLoading evidence...")
+    events = load_parquet_events(case_path)
+    hypotheses = load_hypotheses(case_path)
+    triage_findings = load_triage_findings(case_path)
+
+    click.echo(f"  Events: {len(events)}")
+    click.echo(f"  Hypotheses: {len(hypotheses)}")
+    click.echo(f"  Triage findings: {len(triage_findings)}")
+
+    if not events:
+        click.echo("Warning: No events to analyze")
+        write_completion_marker(case_path, 3)
+        return True
+
+    # Run analysis agents
+    click.echo("\nRunning Analysis Agents")
+    click.echo("-" * 30)
+
+    try:
+        from argus.agents.analysis_agents import run_analysis_agents
+        
+        results = run_analysis_agents(
+            events=events,
+            hypotheses=hypotheses,
+            triage_findings=triage_findings,
+            output_dir=analysis_dir,
+        )
+
+        # Count total claims
+        total_claims = sum(
+            len(r.get("claims", [])) 
+            for r in results.values() 
+            if isinstance(r, dict)
+        )
+
+        click.echo(f"\n  Total claims generated: {total_claims}")
+
+        # Save summary
+        summary = {
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "events_analyzed": len(events),
+            "hypotheses_investigated": len(hypotheses),
+            "agents_run": len([r for r in results.values() if isinstance(r, dict) and "error" not in r]),
+            "total_claims": total_claims,
+        }
+
+        summary_path = analysis_dir / "analysis_summary.json"
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+
+    except ImportError as e:
+        click.echo(click.style(f"  Analysis agents unavailable: {e}", fg="yellow"))
+        click.echo("  Skipping LLM analysis.")
+
+    except Exception as e:
+        click.echo(click.style(f"  Analysis failed: {e}", fg="red"))
+        return False
+
+    # Write completion marker
+    write_completion_marker(case_path, 3)
+
+    click.echo(f"\nPhase 3 complete. Results in: {analysis_dir}")
+    return True
