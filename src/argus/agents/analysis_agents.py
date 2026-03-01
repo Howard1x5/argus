@@ -1,6 +1,6 @@
 """Deep Analysis Agents for Phase 3.
 
-Nine domain-specific agents plus a master synthesizer:
+Ten domain-specific agents plus a master synthesizer:
 - Agent 1: Process Tree Forensics
 - Agent 2: File Operations
 - Agent 3: Registry Forensics
@@ -9,8 +9,9 @@ Nine domain-specific agents plus a master synthesizer:
 - Agent 6: Authentication Forensics
 - Agent 7: Cross-System Correlation
 - Agent 8: PowerShell Deep Dive
-- Agent 9: Anomaly Hunter
-- Agent 10: Master Synthesizer
+- Agent 9: IIS/Webshell Analysis (NEW - critical for webshell attacks)
+- Agent 10: Anomaly Hunter
+- Agent 11: Master Synthesizer
 """
 
 import json
@@ -112,20 +113,38 @@ PROCESS TREE TIMELINE:
 - Count total webshell commands to assess attacker activity level"""
     
     def build_user_prompt(self, context: dict) -> str:
-        events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
-        # Filter for process events
-        process_events = [e for e in events if 
-            any(x in str(e.get("event_type", "")).lower() for x in ["4688", "process", "sysmon_1", "sysmon 1"])]
-        
+        routed = context.get("routed_events", {})
+
+        # Use routed events if available (prioritized by suspiciousness)
+        if routed.get("process"):
+            process_events = routed["process"]
+            source = "routed (prioritized by suspiciousness)"
+        else:
+            events = context.get("events", [])
+            process_events = [e for e in events if
+                any(x in str(e.get("event_type", "")).lower() for x in ["4688", "process", "sysmon_1", "sysmon 1"])]
+            source = "filtered"
+
+        # Also include webshell-related process events (critical)
+        webshell_data = routed.get("webshell", {})
+        w3wp_children = webshell_data.get("w3wp_children", [])
+
         return f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
-## Process Events ({len(process_events)} total, showing sample)
+## CRITICAL: Webshell Process Chain (w3wp.exe children) - {len(w3wp_children)} events
+These are commands executed through webshells - ANALYZE CAREFULLY:
+{json.dumps(w3wp_children[:50], indent=2, default=str)}
+
+## Process Events ({len(process_events)} total, {source})
 {json.dumps(process_events[:100], indent=2, default=str)}
 
-Analyze process creation patterns. Build process trees. Identify suspicious parent-child relationships."""
+CRITICAL TASKS:
+1. Analyze ALL w3wp.exe children - these are webshell commands
+2. Build process trees for suspicious parent-child relationships
+3. Identify credential dumping (pd.exe, procdump targeting LSASS)
+4. Flag reconnaissance commands (whoami, ipconfig, net user)"""
 
 
 class FileOperationsAgent(BaseAgent):
@@ -174,19 +193,37 @@ FILE DOWNLOAD TRACKING (IIS correlation):
 - Flag downloads from internal IPs (pivot machine exfiltrating data)"""
     
     def build_user_prompt(self, context: dict) -> str:
-        events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
-        file_events = [e for e in events if 
-            any(x in str(e.get("event_type", "")).lower() for x in ["file", "sysmon_11", "sysmon_15", "sysmon_23"])]
-        
+        routed = context.get("routed_events", {})
+
+        # Use routed events if available
+        if routed.get("file"):
+            file_events = routed["file"]
+            source = "routed (prioritized)"
+        else:
+            events = context.get("events", [])
+            file_events = [e for e in events if
+                any(x in str(e.get("event_type", "")).lower() for x in ["file", "sysmon_11", "sysmon_15", "sysmon_23"])]
+            source = "filtered"
+
+        # Include credential-related events (dump files)
+        credential_events = routed.get("credential", [])
+
         return f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
-## File Events ({len(file_events)} total, showing sample)
+## CRITICAL: Credential-Related File Events - {len(credential_events)} events
+Look for .dmp files, file renames, and staging:
+{json.dumps(credential_events[:50], indent=2, default=str)}
+
+## File Events ({len(file_events)} total, {source})
 {json.dumps(file_events[:100], indent=2, default=str)}
 
-Analyze file operations. Identify suspicious file creation patterns and staging activity."""
+CRITICAL TASKS:
+1. Find .dmp files (memory dumps, likely LSASS credentials)
+2. Track file renames (dumpfile.dmp -> cool_pic.png pattern)
+3. Identify webshell uploads (.aspx, .asp files in wwwroot)
+4. Find staging locations (Public, Temp, inetpub directories)"""
 
 
 class RegistryAgent(BaseAgent):
@@ -267,20 +304,38 @@ TIMELINE GAP ANALYSIS:
 - Gap pattern: credential dump → offline cracking → return with new access"""
     
     def build_user_prompt(self, context: dict) -> str:
-        events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
-        net_events = [e for e in events if 
-            any(x in str(e.get("event_type", "")).lower() for x in ["network", "sysmon_3", "sysmon_22", "dns", "connection", "pcap"]) or
-            e.get("dest_ip") or e.get("source_ip")]
-        
+        routed = context.get("routed_events", {})
+
+        # Use routed events if available
+        if routed.get("network"):
+            net_events = routed["network"]
+            source = "routed (prioritized)"
+        else:
+            events = context.get("events", [])
+            net_events = [e for e in events if
+                any(x in str(e.get("event_type", "")).lower() for x in ["network", "sysmon_3", "sysmon_22", "dns", "connection", "pcap"]) or
+                e.get("dest_ip") or e.get("source_ip")]
+            source = "filtered"
+
+        # Include lateral movement events
+        lateral_events = routed.get("lateral_movement", [])
+
         return f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
-## Network Events ({len(net_events)} total, showing sample)
+## CRITICAL: Lateral Movement Events - {len(lateral_events)} events
+SMB (445), WMI (135), WinRM connections and related auth:
+{json.dumps(lateral_events[:50], indent=2, default=str)}
+
+## Network Events ({len(net_events)} total, {source})
 {json.dumps(net_events[:100], indent=2, default=str)}
 
-Analyze network activity. Identify external connections, lateral movement, and C2 patterns."""
+CRITICAL TASKS:
+1. Identify SMB (445) and WMI (135) connections between internal hosts
+2. Track source IP changes (external -> internal = pivot)
+3. Correlate network connections with service creation timestamps
+4. Flag connections from webserver to DC (lateral movement indicator)"""
 
 
 class ServiceAgent(BaseAgent):
@@ -375,20 +430,38 @@ ATTACK PHASE MARKERS IN AUTH LOGS:
 5. Domain compromise: Admin auth to DC from internal attacker IP"""
     
     def build_user_prompt(self, context: dict) -> str:
-        events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
-        auth_events = [e for e in events if 
-            any(x in str(e.get("event_type", "")).lower() for x in 
-                ["4624", "4625", "4648", "4672", "4769", "4771", "4776", "logon", "auth", "kerberos"])]
-        
+        routed = context.get("routed_events", {})
+
+        # Use routed events if available
+        if routed.get("auth"):
+            auth_events = routed["auth"]
+            source = "routed (prioritized)"
+        else:
+            events = context.get("events", [])
+            auth_events = [e for e in events if
+                any(x in str(e.get("event_type", "")).lower() for x in
+                    ["4624", "4625", "4648", "4672", "4769", "4771", "4776", "logon", "auth", "kerberos"])]
+            source = "filtered"
+
+        # Include lateral movement events (contains auth for lateral movement)
+        lateral_events = routed.get("lateral_movement", [])
+
         return f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
-## Authentication Events ({len(auth_events)} total, showing sample)
+## CRITICAL: Lateral Movement Auth Events - {len(lateral_events)} events
+NTLM and network logons related to lateral movement:
+{json.dumps(lateral_events[:50], indent=2, default=str)}
+
+## Authentication Events ({len(auth_events)} total, {source})
 {json.dumps(auth_events[:100], indent=2, default=str)}
 
-Analyze authentication patterns. Identify credential attacks and suspicious logon activity."""
+CRITICAL TASKS:
+1. Identify pass-the-hash indicators (NTLM auth from unusual sources)
+2. Track auth after credential dump timestamps
+3. Flag LogonType 3 (network) from webserver to DC
+4. Map user credentials appearing from new source IPs"""
 
 
 class CrossSystemAgent(BaseAgent):
@@ -454,6 +527,7 @@ Track commands that reference OTHER systems:
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
+        routed = context.get("routed_events", {})
 
         # Group by source system
         by_system = {}
@@ -463,11 +537,19 @@ Track commands that reference OTHER systems:
                 by_system[system] = []
             by_system[system].append(e)
 
-        # Extract IIS events for webshell analysis
-        iis_events = [e for e in events if
-            e.get("parser_name") == "iis" or
-            "iis" in str(e.get("source_file", "")).lower() or
-            e.get("http_method")]
+        # Get routed data
+        webshell_data = routed.get("webshell", {})
+        iis_events = webshell_data.get("iis_requests", [])
+        w3wp_children = webshell_data.get("w3wp_children", [])
+        lateral_events = routed.get("lateral_movement", [])
+        credential_events = routed.get("credential", [])
+
+        # Fallback if not routed
+        if not iis_events:
+            iis_events = [e for e in events if
+                e.get("parser_name") == "iis" or
+                "iis" in str(e.get("source_file", "")).lower() or
+                e.get("http_method")]
 
         # Extract unique source IPs from IIS logs
         source_ips = set()
@@ -480,27 +562,34 @@ Track commands that reference OTHER systems:
 
 ## Systems Found: {list(by_system.keys())}
 
-## IIS/Web Log Analysis
-- Total web requests: {len(iis_events)}
-- Unique source IPs (clients): {list(source_ips)[:20]}
+## CRITICAL: Cross-System Attack Indicators
 
-### IIS Events (for pivot detection - check client IPs and User-Agents):
+### Webshell Access (IIS) - {len(iis_events)} requests
+Unique source IPs: {list(source_ips)[:20]}
 {json.dumps(iis_events[:30], indent=2, default=str)}
+
+### Webshell Command Execution (w3wp children) - {len(w3wp_children)} commands
+{json.dumps(w3wp_children[:30], indent=2, default=str)}
+
+### Lateral Movement Events - {len(lateral_events)} events
+SMB/WMI connections and service installations:
+{json.dumps(lateral_events[:30], indent=2, default=str)}
+
+### Credential Events - {len(credential_events)} events
+{json.dumps(credential_events[:20], indent=2, default=str)}
 
 ## Events by System (samples):
 """
         for system, sys_events in list(by_system.items())[:5]:
-            prompt += f"\n### {system} ({len(sys_events)} events)\n{json.dumps(sys_events[:20], indent=2, default=str)}\n"
+            prompt += f"\n### {system} ({len(sys_events)} events)\n{json.dumps(sys_events[:15], indent=2, default=str)}\n"
 
         prompt += """
-Correlate activity across systems. Map the attack path. Identify lateral movement.
-
-KEY ANALYSIS TASKS:
-1. Track source IP changes in IIS logs (external → internal = pivot)
-2. Correlate IIS requests with Sysmon process creation (webshell commands)
-3. Map credential dump timestamps to subsequent authentications
-4. Build cross-system timeline showing attack flow between hosts
-"""
+CRITICAL CROSS-SYSTEM ANALYSIS:
+1. Map attack path: External IP -> Webshell -> Credential Dump -> Pivot -> Lateral Movement
+2. Correlate: IIS request timestamp -> w3wp child process (same command, ~2 seconds)
+3. Track: Credential dump time -> New auth from different IP (pivot machine)
+4. Identify: Commands on WEB01 targeting DCSRV (lateral movement)
+5. Build complete timeline spanning all systems"""
         return prompt
 
 
@@ -558,29 +647,191 @@ PAYLOAD URL TRACKING:
 - Track: URL → downloaded filename → execution timestamp"""
     
     def build_user_prompt(self, context: dict) -> str:
-        events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
-        ps_events = [e for e in events if 
-            any(x in str(e).lower() for x in ["powershell", "-enc", "invoke-", "iex", "4104", "scriptblock"])]
-        
+        routed = context.get("routed_events", {})
+
+        # Use routed events if available
+        if routed.get("powershell"):
+            ps_events = routed["powershell"]
+            source = "routed (prioritized)"
+        else:
+            events = context.get("events", [])
+            ps_events = [e for e in events if
+                any(x in str(e).lower() for x in ["powershell", "-enc", "invoke-", "iex", "4104", "scriptblock"])]
+            source = "filtered"
+
+        # Include webshell data for base64 command analysis
+        webshell_data = routed.get("webshell", {})
+        w3wp_children = webshell_data.get("w3wp_children", [])
+
+        # Include credential events (may have Invoke-Mimikatz etc)
+        credential_events = routed.get("credential", [])
+
         return f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
-## PowerShell-Related Events ({len(ps_events)} total, showing sample)
-{json.dumps(ps_events[:100], indent=2, default=str)}
+## CRITICAL: Webshell Command Execution (w3wp children) - {len(w3wp_children)} events
+Commands executed via webshell - may contain encoded PowerShell:
+{json.dumps(w3wp_children[:40], indent=2, default=str)}
 
-Deep dive into PowerShell. DECODE all encoded commands. Identify malicious scripts."""
+## CRITICAL: Credential-Related Events - {len(credential_events)} events
+Look for Invoke-Mimikatz, Invoke-WMIExec, Invoke-SMBExec:
+{json.dumps(credential_events[:40], indent=2, default=str)}
+
+## PowerShell Events ({len(ps_events)} total, {source})
+{json.dumps(ps_events[:80], indent=2, default=str)}
+
+CRITICAL TASKS:
+1. DECODE all base64/encoded commands
+2. Identify Invoke-WMIExec, Invoke-SMBExec with -Hash parameter
+3. Extract NTLM hashes from commands (32 hex characters)
+4. Track iwe.ps1, ise.ps1 script execution
+5. Build command timeline showing attack progression"""
+
+
+class IISWebshellAgent(BaseAgent):
+    """Agent 9: IIS and Webshell Analysis."""
+
+    name = "agent_09_iis_webshell"
+    description = "Deep analysis of IIS logs and webshell activity"
+
+    def get_system_prompt(self) -> str:
+        return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "9") + """
+
+YOUR DOMAIN: IIS Log and Webshell Analysis (CRITICAL)
+
+You analyze IIS web server logs to detect webshell activity, attacker pivots, and command execution.
+This is often the PRIMARY entry point for attacks - PAY CLOSE ATTENTION.
+
+IIS LOG FORMAT:
+- date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) sc-status
+- c-ip (client IP) = WHO is sending requests (attacker's IP)
+- cs-uri-query = Query string - often contains base64-encoded commands
+- cs(User-Agent) = Fingerprints the attacker's machine
+
+WEBSHELL DETECTION (HIGHEST PRIORITY):
+1. Look for .aspx, .asp, .php, .jsp files with suspicious names:
+   - forbiden.aspx, forbidden.aspx, cmd.aspx, shell.aspx, ok.aspx
+   - Files in /uploads/, /temp/, /scripts/ directories
+2. Multiple requests to same suspicious file = webshell in use
+3. Query parameters like: cmd=, c=, exec=, command= (often with base64)
+
+BASE64 COMMAND EXTRACTION (CRITICAL):
+1. Find all requests with query strings containing base64 patterns
+2. Pattern: cmd=<base64> or c=<base64> or similar
+3. DECODE each base64 value and list the actual command
+4. Build chronological command list: timestamp + source IP + decoded command
+
+ATTACKER PIVOT DETECTION:
+1. Track ALL unique source IPs (c-ip) accessing webshells
+2. FLAG when SAME webshell accessed from DIFFERENT IP ranges:
+   - External IP (e.g., 45.x.x.x) = initial compromise
+   - Internal IP (e.g., 192.168.x.x, 10.x.x.x) = PIVOT OCCURRED
+3. This pattern indicates attacker has compromised internal infrastructure
+
+USER-AGENT FINGERPRINTING:
+1. Track User-Agent per source IP
+2. FLAG changes that indicate platform switch:
+   - Windows User-Agent → Linux User-Agent = attacker moved to attack VM
+   - "Mozilla/5.0 (X11; Linux x86_64)" = likely Kali Linux
+   - "python-requests", "curl", "wget" = scripted attacks
+3. Different User-Agents from same "attacker" over time = multiple machines
+
+VIRTUALBOX/VM PIVOT INDICATORS:
+- 192.168.56.x network = VirtualBox host-only (common lab/attack setup)
+- 192.168.56.1 = typically the VirtualBox HOST machine
+- If internal IP appears with Linux UA on Windows network = VM pivot
+
+COMMAND CATEGORIZATION:
+After decoding base64 commands, categorize by attack phase:
+1. RECONNAISSANCE: whoami, ipconfig, net user, nltest, tasklist
+2. PRIVILEGE CHECK: whoami /priv, net localgroup Administrators
+3. DISCOVERY: wmic process list, dir, systeminfo, netstat
+4. CREDENTIAL ACCESS: pd.exe, procdump, mimikatz commands
+5. STAGING: move, copy, rename commands (especially .dmp files)
+6. LATERAL MOVEMENT: Invoke-WMIExec, Invoke-SMBExec, -Hash parameter
+
+TIMELINE RECONSTRUCTION:
+- Build complete webshell command timeline
+- Note gaps >15 minutes (attacker pauses/credential cracking)
+- Track command sophistication progression
+- First external IP, then internal = pivot timestamp
+
+OUTPUT REQUIREMENTS:
+1. List ALL webshell files accessed
+2. List ALL source IPs accessing webshells with User-Agent
+3. DECODE all base64 commands with timestamps
+4. Identify pivot point (when internal IP first appears)
+5. Categorize decoded commands by attack phase"""
+
+    def build_user_prompt(self, context: dict) -> str:
+        hypotheses = context.get("hypotheses", [])
+        routed = context.get("routed_events", {})
+
+        # Get pre-routed webshell data
+        webshell_data = routed.get("webshell", {})
+        iis_events = webshell_data.get("iis_requests", [])
+        w3wp_children = webshell_data.get("w3wp_children", [])
+        total_iis = webshell_data.get("total_iis", 0)
+        total_w3wp = webshell_data.get("total_w3wp_children", 0)
+
+        # Fallback to manual filtering if routing not available
+        if not iis_events:
+            events = context.get("events", [])
+            iis_events = [e for e in events if
+                e.get("parser_name") == "iis" or
+                "iis" in str(e.get("_source_parquet", "")).lower() or
+                e.get("http_method") or
+                e.get("uri")]
+            total_iis = len(iis_events)
+
+            w3wp_children = [e for e in events if
+                "w3wp" in str(e.get("parent_process_name", "")).lower() or
+                "w3wp" in str(e.get("process_name", "")).lower() or
+                "iis apppool" in str(e.get("username", "")).lower() or
+                "defaultapppool" in str(e.get("username", "")).lower()]
+            total_w3wp = len(w3wp_children)
+
+        # Find suspicious URI patterns from IIS events
+        suspicious_uris = [e for e in iis_events if
+            any(x in str(e.get("uri", "")).lower()
+                for x in ["aspx", "asp", "cmd", "shell", "forbid", "upload"])]
+
+        return f"""## Hypotheses to Investigate
+{json.dumps(hypotheses[:5], indent=2, default=str)}
+
+## CRITICAL: Webshell Access Summary
+- Total IIS requests: {total_iis}
+- Total w3wp.exe children (webshell commands): {total_w3wp}
+- Suspicious URI requests: {len(suspicious_uris)}
+
+## PRIORITY 1: Suspicious URI Requests (webshell access)
+{json.dumps(suspicious_uris[:60], indent=2, default=str)}
+
+## PRIORITY 2: Webshell Command Execution (w3wp.exe children)
+These are the actual commands executed through the webshell:
+{json.dumps(w3wp_children[:60], indent=2, default=str)}
+
+## IIS Events Sample (for User-Agent and IP tracking)
+{json.dumps(iis_events[:80], indent=2, default=str)}
+
+CRITICAL ANALYSIS TASKS:
+1. List ALL webshell files accessed (forbiden.aspx, etc.)
+2. Extract and DECODE all base64 commands from query strings (cmd= parameter)
+3. Track ALL source IPs accessing webshells - flag external vs internal
+4. Identify PIVOT POINT: when does internal IP (192.168.x) first appear?
+5. Track User-Agent changes: Windows -> Linux indicates attacker moved to attack VM
+6. Build complete command timeline with timestamps, IPs, and decoded commands"""
 
 
 class AnomalyHunterAgent(BaseAgent):
-    """Agent 9: Anomaly Hunter."""
-    
-    name = "agent_09_anomalies"
+    """Agent 10: Anomaly Hunter."""
+
+    name = "agent_10_anomalies"
     description = "Finds anything other agents might miss"
-    
+
     def get_system_prompt(self) -> str:
-        return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "9") + """
+        return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "10") + """
 
 YOUR DOMAIN: Anomaly Hunter (Wildcard)
 Find anything other agents might miss:
@@ -650,9 +901,9 @@ Hunt for anomalies. Find what other agents missed. Look for rare events and susp
 
 
 class SynthesizerAgent(BaseAgent):
-    """Agent 10: Master Synthesizer."""
-    
-    name = "agent_10_synthesizer"
+    """Agent 11: Master Synthesizer."""
+
+    name = "agent_11_synthesizer"
     description = "Synthesizes all agent findings into unified analysis"
     max_tokens = 8192
     
@@ -724,6 +975,7 @@ ANALYSIS_AGENTS = [
     AuthenticationAgent,
     CrossSystemAgent,
     PowerShellAgent,
+    IISWebshellAgent,
     AnomalyHunterAgent,
 ]
 
@@ -735,26 +987,30 @@ def run_analysis_agents(
     hypotheses: list[dict],
     triage_findings: list[dict],
     output_dir: Path,
+    routed_events: Optional[dict] = None,
 ) -> dict:
     """Run all analysis agents and synthesizer.
-    
+
     Args:
-        events: Parsed events
+        events: Parsed events (full set)
         hypotheses: Hypotheses from Phase 2
         triage_findings: Findings from triage
         output_dir: Directory for output files
-        
+        routed_events: Pre-categorized and prioritized events from EventRouter
+
     Returns:
         Dict with all agent results and synthesis
     """
     results = {}
     agents_dir = output_dir / "agents"
     agents_dir.mkdir(exist_ok=True)
-    
+
+    # Use routed events if available, otherwise fall back to full event set
     context = {
         "events": events,
         "hypotheses": hypotheses,
         "triage_findings": triage_findings,
+        "routed_events": routed_events or {},
     }
     
     # Run domain agents

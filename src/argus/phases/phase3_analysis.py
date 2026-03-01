@@ -1,7 +1,10 @@
-"""Phase 3: DEEP ANALYSIS - Agent Army Analysis.
+"""Phase 3: DEEP ANALYSIS
 
-Runs 9 domain-specific LLM agents plus a master synthesizer
-to perform deep forensic analysis of the evidence.
+Phase 3a: ForensicExtractor (programmatic) - queries 100% of data, decodes, correlates
+Phase 3b: LLM Agents - interpret complete extraction results
+
+Per SPEC v1.1: Agents receive COMPLETE extraction results, NOT sampled events.
+ForensicExtractor does DISCOVERY. Agents do INTERPRETATION.
 """
 
 import json
@@ -98,15 +101,34 @@ def run_analysis(case_path_str: str) -> bool:
         write_completion_marker(case_path, 3)
         return True
 
-    # Run analysis agents
-    click.echo("\nRunning Analysis Agents")
+    # Phase 3a: Run ForensicExtractor (programmatic - queries 100% of data)
+    click.echo("\nPhase 3a: Forensic Extraction")
+    click.echo("-" * 30)
+
+    extractions_dir = case_path / "extractions"
+    extractions_dir.mkdir(exist_ok=True)
+
+    try:
+        from argus.extractors.forensic_extractor import ForensicExtractor
+
+        extractor = ForensicExtractor(case_path)
+        extractions = extractor.run_all_extractions()
+
+        click.echo(f"  Extractions complete: {len(extractions)} categories")
+
+    except ImportError:
+        click.echo("  ForensicExtractor not yet implemented, skipping Phase 3a")
+        extractions = {}
+
+    # Phase 3b: Run analysis agents with extraction results
+    click.echo("\nPhase 3b: Deep Analysis (LLM Agents)")
     click.echo("-" * 30)
 
     try:
         from argus.agents.analysis_agents import run_analysis_agents
-        
+
         results = run_analysis_agents(
-            events=events,
+            extractions=extractions,
             hypotheses=hypotheses,
             triage_findings=triage_findings,
             output_dir=analysis_dir,

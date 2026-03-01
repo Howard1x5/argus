@@ -44,62 +44,99 @@ SUSPICIOUS_EVENT_IDS = {
     22: "Sysmon DNS Query",
 }
 
-# Suspicious patterns to search for
+# Pattern priority levels for stratified sampling
+PRIORITY_CRITICAL = 1  # Must include in findings
+PRIORITY_HIGH = 2      # High priority
+PRIORITY_MEDIUM = 3    # Medium priority
+PRIORITY_LOW = 4       # Low priority (background noise often)
+
+# Suspicious patterns to search for - now with priority levels
 SUSPICIOUS_PATTERNS = [
-    # Encoded PowerShell
-    (r"-[eE][nN][cC]\s", "Encoded PowerShell command"),
-    (r"-[eE]ncoded[cC]ommand\s", "Encoded PowerShell command"),
-    (r"[A-Za-z0-9+/]{50,}={0,2}", "Base64 string (50+ chars)"),
+    # ===== CRITICAL: Webshell Execution Chain =====
+    (r"w3wp\.exe", "IIS worker process (webshell indicator)", PRIORITY_CRITICAL),
+    (r"forbiden\.aspx", "Known webshell filename", PRIORITY_CRITICAL),
+    (r"forbidden\.aspx", "Known webshell filename variant", PRIORITY_CRITICAL),
+    (r"cmd\.aspx", "Webshell filename", PRIORITY_CRITICAL),
+    (r"shell\.aspx", "Webshell filename", PRIORITY_CRITICAL),
+    (r"IIS APPPOOL", "IIS Application Pool user context", PRIORITY_CRITICAL),
+    (r"DefaultAppPool", "Default IIS App Pool", PRIORITY_CRITICAL),
 
-    # Hidden PowerShell
-    (r"-[wW]\s*[hH]idden", "Hidden PowerShell window"),
-    (r"-[nN]o[pP]", "PowerShell no profile"),
-    (r"-[eE]xec\s*[bB]ypass", "PowerShell execution bypass"),
+    # ===== CRITICAL: Credential Dumping =====
+    (r"pd\.exe", "ProcDump (credential harvesting)", PRIORITY_CRITICAL),
+    (r"pd64\.exe", "ProcDump 64-bit", PRIORITY_CRITICAL),
+    (r"procdump\.exe", "ProcDump executable", PRIORITY_CRITICAL),
+    (r"-accepteula.*-ma", "ProcDump memory dump flags", PRIORITY_CRITICAL),
+    (r"-ma\s+\d+", "Memory dump with PID", PRIORITY_CRITICAL),
+    (r"lsass", "LSASS process reference", PRIORITY_CRITICAL),
+    (r"\.dmp", "Memory dump file", PRIORITY_CRITICAL),
+    (r"mimikatz", "Mimikatz", PRIORITY_CRITICAL),
+    (r"sekurlsa", "Sekurlsa (credential dump)", PRIORITY_CRITICAL),
 
-    # Command execution
-    (r"cmd\.exe\s*/[cC]", "CMD command execution"),
-    (r"cmd\s*/[cC]", "CMD command execution"),
+    # ===== CRITICAL: Lateral Movement =====
+    (r"Invoke-WMIExec", "WMI lateral movement", PRIORITY_CRITICAL),
+    (r"Invoke-SMBExec", "SMB lateral movement", PRIORITY_CRITICAL),
+    (r"Invoke-TheHash", "Pass-the-hash toolkit", PRIORITY_CRITICAL),
+    (r"iwe\.ps1", "Invoke-WMIExec script", PRIORITY_CRITICAL),
+    (r"ise\.ps1", "Invoke-SMBExec script", PRIORITY_CRITICAL),
+    (r"-Hash\s+[a-fA-F0-9]{32}", "NTLM hash parameter", PRIORITY_CRITICAL),
+    (r"-Target\s+\d+\.\d+\.\d+\.\d+", "Target IP in lateral movement", PRIORITY_CRITICAL),
 
-    # LOLBins
-    (r"certutil.*-urlcache", "Certutil download"),
-    (r"certutil.*-decode", "Certutil decode"),
-    (r"mshta\s+http", "MSHTA remote execution"),
-    (r"regsvr32.*\/s.*\/u.*http", "Regsvr32 remote load"),
-    (r"rundll32.*javascript", "Rundll32 script execution"),
-    (r"wmic.*process.*call.*create", "WMIC process creation"),
-    (r"bitsadmin.*\/transfer", "BITSAdmin download"),
+    # ===== HIGH: Encoded/Obfuscated Commands =====
+    (r"-[eE][nN][cC]\s", "Encoded PowerShell command", PRIORITY_HIGH),
+    (r"-[eE]ncoded[cC]ommand\s", "Encoded PowerShell command", PRIORITY_HIGH),
+    (r"[A-Za-z0-9+/]{50,}={0,2}", "Base64 string (50+ chars)", PRIORITY_HIGH),
 
-    # Scheduled tasks
-    (r"schtasks.*\/create", "Scheduled task creation"),
+    # ===== HIGH: Hidden PowerShell =====
+    (r"-[wW]\s*[hH]idden", "Hidden PowerShell window", PRIORITY_HIGH),
+    (r"-[nN]o[pP]", "PowerShell no profile", PRIORITY_HIGH),
+    (r"-[eE]xec\s*[bB]ypass", "PowerShell execution bypass", PRIORITY_HIGH),
 
-    # Lateral movement
-    (r"psexec", "PsExec usage"),
-    (r"wmiexec", "WMI execution"),
-    (r"winrm", "WinRM usage"),
+    # ===== HIGH: Command execution =====
+    (r"cmd\.exe\s*/[cC]", "CMD command execution", PRIORITY_HIGH),
+    (r"cmd\s*/[cC]", "CMD command execution", PRIORITY_HIGH),
 
-    # Credential tools
-    (r"mimikatz", "Mimikatz"),
-    (r"sekurlsa", "Sekurlsa (credential dump)"),
-    (r"procdump.*lsass", "ProcDump LSASS dump"),
-    (r"lsass\.dmp", "LSASS dump file"),
+    # ===== HIGH: LOLBins =====
+    (r"certutil.*-urlcache", "Certutil download", PRIORITY_HIGH),
+    (r"certutil.*-decode", "Certutil decode", PRIORITY_HIGH),
+    (r"mshta\s+http", "MSHTA remote execution", PRIORITY_HIGH),
+    (r"regsvr32.*\/s.*\/u.*http", "Regsvr32 remote load", PRIORITY_HIGH),
+    (r"rundll32.*javascript", "Rundll32 script execution", PRIORITY_HIGH),
+    (r"wmic.*process.*call.*create", "WMIC process creation", PRIORITY_HIGH),
+    (r"bitsadmin.*\/transfer", "BITSAdmin download", PRIORITY_HIGH),
 
-    # Reconnaissance
-    (r"net\s+user", "Net user enumeration"),
-    (r"net\s+localgroup", "Net localgroup enumeration"),
-    (r"nltest", "Domain trust enumeration"),
-    (r"whoami", "User context check"),
-    (r"ipconfig\s*/all", "Network config enumeration"),
-    (r"systeminfo", "System info enumeration"),
+    # ===== HIGH: Scheduled tasks =====
+    (r"schtasks.*\/create", "Scheduled task creation", PRIORITY_HIGH),
 
-    # Web attacks
-    (r"SELECT.*FROM.*WHERE", "SQL injection attempt"),
-    (r"UNION\s+SELECT", "SQL UNION injection"),
-    (r"\.\./\.\./", "Path traversal"),
-    (r"%2e%2e%2f", "URL-encoded path traversal"),
-    (r"<script", "XSS attempt"),
-    (r"\.asp[x]?\?", "Webshell indicator"),
-    (r"cmd=", "Command parameter"),
-    (r"exec=", "Exec parameter"),
+    # ===== HIGH: Lateral movement (generic) =====
+    (r"psexec", "PsExec usage", PRIORITY_HIGH),
+    (r"wmiexec", "WMI execution", PRIORITY_HIGH),
+    (r"winrm", "WinRM usage", PRIORITY_HIGH),
+
+    # ===== MEDIUM: Reconnaissance =====
+    (r"net\s+user", "Net user enumeration", PRIORITY_MEDIUM),
+    (r"net\s+localgroup", "Net localgroup enumeration", PRIORITY_MEDIUM),
+    (r"nltest", "Domain trust enumeration", PRIORITY_MEDIUM),
+    (r"whoami", "User context check", PRIORITY_MEDIUM),
+    (r"ipconfig\s*/all", "Network config enumeration", PRIORITY_MEDIUM),
+    (r"ipconfig", "Network config check", PRIORITY_MEDIUM),
+    (r"systeminfo", "System info enumeration", PRIORITY_MEDIUM),
+    (r"tasklist", "Process enumeration", PRIORITY_MEDIUM),
+    (r"netstat", "Network connections enumeration", PRIORITY_MEDIUM),
+    (r"wmic\s+process\s+list", "Process list via WMI", PRIORITY_MEDIUM),
+
+    # ===== MEDIUM: Web attacks =====
+    (r"SELECT.*FROM.*WHERE", "SQL injection attempt", PRIORITY_MEDIUM),
+    (r"UNION\s+SELECT", "SQL UNION injection", PRIORITY_MEDIUM),
+    (r"\.\./\.\./", "Path traversal", PRIORITY_MEDIUM),
+    (r"%2e%2e%2f", "URL-encoded path traversal", PRIORITY_MEDIUM),
+    (r"<script", "XSS attempt", PRIORITY_MEDIUM),
+    (r"\.asp[x]?\?", "Webshell indicator", PRIORITY_MEDIUM),
+    (r"cmd=", "Command parameter", PRIORITY_MEDIUM),
+    (r"exec=", "Exec parameter", PRIORITY_MEDIUM),
+
+    # ===== LOW: Potentially noisy but useful =====
+    (r"powershell\.exe", "PowerShell execution", PRIORITY_LOW),
+    (r"splunk-powershell", "Splunk PowerShell (usually benign)", PRIORITY_LOW),
 ]
 
 
@@ -252,27 +289,125 @@ def run_programmatic_scan(events: list[dict]) -> dict:
         if error_codes > len(web_events) * 0.1:
             results["web_stats"]["high_error_rate"] = True
 
-    # Suspicious pattern scan
+    # Suspicious pattern scan with priority-based stratified sampling
+    findings_by_priority = {
+        PRIORITY_CRITICAL: [],
+        PRIORITY_HIGH: [],
+        PRIORITY_MEDIUM: [],
+        PRIORITY_LOW: [],
+    }
+
+    # Also track findings by time bucket for time-stratified sampling
+    findings_by_hour = defaultdict(list)
+
     for event in events:
         searchable = " ".join(str(v) for v in event.values() if v).lower()
 
-        for pattern, description in SUSPICIOUS_PATTERNS:
+        # Get timestamp for time stratification
+        ts = event.get("timestamp_utc", "")
+        hour_key = "unknown"
+        if ts:
+            if isinstance(ts, str):
+                try:
+                    ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    hour_key = ts_dt.strftime("%Y-%m-%d %H:00")
+                except ValueError:
+                    pass
+            elif hasattr(ts, 'strftime'):
+                hour_key = ts.strftime("%Y-%m-%d %H:00")
+
+        for pattern, description, priority in SUSPICIOUS_PATTERNS:
             if re.search(pattern, searchable, re.IGNORECASE):
                 finding = {
                     "pattern": description,
+                    "priority": priority,
                     "source_file": event.get("source_file", ""),
                     "source_line": event.get("source_line", 0),
                     "timestamp": event.get("timestamp_utc", ""),
                     "event_type": event.get("event_type", ""),
                     "matched_content": searchable[:500],
+                    "hour_bucket": hour_key,
                 }
 
-                # Avoid duplicates
-                if finding not in results["suspicious_findings"]:
-                    results["suspicious_findings"].append(finding)
+                # Avoid exact duplicates
+                is_dup = False
+                for existing in findings_by_priority[priority]:
+                    if (existing.get("source_file") == finding.get("source_file") and
+                        existing.get("source_line") == finding.get("source_line") and
+                        existing.get("pattern") == finding.get("pattern")):
+                        is_dup = True
+                        break
 
-    # Limit findings
-    results["suspicious_findings"] = results["suspicious_findings"][:500]
+                if not is_dup:
+                    findings_by_priority[priority].append(finding)
+                    findings_by_hour[hour_key].append(finding)
+
+    # Priority-based selection:
+    # - ALL critical findings (up to 200)
+    # - HIGH findings stratified by time (up to 200)
+    # - MEDIUM findings stratified by time (up to 100)
+    # - LOW findings only if space remains
+
+    final_findings = []
+
+    # 1. Include ALL critical findings (these are the attack indicators)
+    critical = findings_by_priority[PRIORITY_CRITICAL][:200]
+    final_findings.extend(critical)
+
+    # 2. Time-stratified sampling for HIGH priority
+    high_findings = findings_by_priority[PRIORITY_HIGH]
+    if high_findings:
+        # Group by hour and sample evenly
+        high_by_hour = defaultdict(list)
+        for f in high_findings:
+            high_by_hour[f.get("hour_bucket", "unknown")].append(f)
+
+        # Take up to 200, distributed across hours
+        remaining = 200
+        hours = sorted(high_by_hour.keys())
+        per_hour = max(1, remaining // max(1, len(hours)))
+        for hour in hours:
+            take = min(per_hour, len(high_by_hour[hour]), remaining)
+            final_findings.extend(high_by_hour[hour][:take])
+            remaining -= take
+            if remaining <= 0:
+                break
+
+    # 3. Time-stratified sampling for MEDIUM priority
+    medium_findings = findings_by_priority[PRIORITY_MEDIUM]
+    if medium_findings:
+        medium_by_hour = defaultdict(list)
+        for f in medium_findings:
+            medium_by_hour[f.get("hour_bucket", "unknown")].append(f)
+
+        remaining = 100
+        hours = sorted(medium_by_hour.keys())
+        per_hour = max(1, remaining // max(1, len(hours)))
+        for hour in hours:
+            take = min(per_hour, len(medium_by_hour[hour]), remaining)
+            final_findings.extend(medium_by_hour[hour][:take])
+            remaining -= take
+            if remaining <= 0:
+                break
+
+    # 4. LOW priority only if we have space (skip noisy ones like Splunk)
+    low_findings = [f for f in findings_by_priority[PRIORITY_LOW]
+                    if "splunk" not in f.get("matched_content", "").lower()]
+    if len(final_findings) < 500 and low_findings:
+        remaining = 500 - len(final_findings)
+        final_findings.extend(low_findings[:remaining])
+
+    results["suspicious_findings"] = final_findings
+
+    # Add summary of what was found by priority
+    results["findings_summary"] = {
+        "critical": len(findings_by_priority[PRIORITY_CRITICAL]),
+        "high": len(findings_by_priority[PRIORITY_HIGH]),
+        "medium": len(findings_by_priority[PRIORITY_MEDIUM]),
+        "low": len(findings_by_priority[PRIORITY_LOW]),
+        "hours_with_findings": len(findings_by_hour),
+        "selected_for_analysis": len(final_findings),
+    }
 
     return results
 
