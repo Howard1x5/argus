@@ -77,7 +77,19 @@ Analyze Sysmon Event ID 1 and Windows Event 4688 for:
 - Extract: Image, CommandLine, ParentImage, ParentCommandLine, User, ProcessId
 - Flag: web server children (w3wp.exe, httpd), services.exe spawns, encoded commands
 - Identify LOLBIN abuse (certutil, mshta, regsvr32, rundll32, wmic, bitsadmin)
-- Note if Sysmon data is missing (4688 lacks parent command lines)"""
+- Note if Sysmon data is missing (4688 lacks parent command lines)
+
+CRITICAL WEBSHELL DETECTION:
+- Flag ANY w3wp.exe → cmd.exe or w3wp.exe → powershell.exe chains (WEBSHELL INDICATOR)
+- This pattern indicates command execution through a web shell (e.g., ASP/ASPX shell)
+- Look for base64-encoded commands in these chains
+- Common webshell file locations: C:\\inetpub\\, uploads\\, temp\\
+
+CREDENTIAL DUMPING DETECTION:
+- Flag pd.exe, procdump.exe, procdump64.exe execution
+- Flag ANY process with command line containing "lsass" or "-ma" (memory dump)
+- ProcDump with "-accepteula -ma <pid>" targeting LSASS = credential harvesting
+- Look for output files: .dmp files, especially in Public, Temp folders"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -111,7 +123,20 @@ Analyze Sysmon Event ID 11 (FileCreate), 15 (FileCreateStreamHash), 23 (FileDele
 - Flag files in: Temp, Public, Downloads, inetpub, ProgramData
 - Flag: executables, scripts (.ps1, .bat, .vbs), renamed extensions
 - Cross-reference ProcessId to identify which process created each file
-- Look for staging activity and suspicious file placement"""
+- Look for staging activity and suspicious file placement
+
+WEBSHELL UPLOAD DETECTION (CRITICAL):
+- .aspx, .asp, .php, .jsp files created in inetpub/wwwroot
+- Files with suspicious names: forbiden.aspx, cmd.aspx, shell.aspx
+- w3wp.exe as Image (IIS creating files) in uploads directories
+- Look for multiple webshells: redirect.aspx, ok.aspx, forbidden.aspx variants
+
+ATTACK TOOL STAGING:
+- pd.exe, procdump.exe = credential harvesting tool
+- iwe.ps1, ise.ps1 = Invoke-WMIExec/SMBExec (Invoke-TheHash toolkit)
+- mimikatz, m.exe, kiwi = credential dumping
+- Files renamed to hide purpose: cool_pic.png (was dumpfile.dmp)
+- .dmp files = memory dumps (likely LSASS credentials)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -177,7 +202,18 @@ Analyze Sysmon Event ID 3 (NetworkConnect), 22 (DNSQuery), and PCAP data:
 - Flag: external connections from internal hosts
 - Flag: internal lateral movement (internal-to-internal on suspicious ports)
 - Identify C2 patterns: beaconing intervals, known-bad ports (4444, 5555, etc.)
-- Look for DNS tunneling or suspicious domain queries"""
+- Look for DNS tunneling or suspicious domain queries
+
+LATERAL MOVEMENT DETECTION (CRITICAL):
+- Port 445 (SMB) connections between internal hosts = potential SMBExec/PsExec
+- Port 135 (RPC/WMI) connections = potential WMI-based lateral movement
+- Port 5985/5986 (WinRM) connections = PowerShell remoting
+- Correlate network connections with PowerShell process creation
+- Map: Source IP → Destination IP → Service created on destination
+
+PASS-THE-HASH INDICATORS:
+- PowerShell.exe making SMB (445) or RPC (135) connections to domain controller
+- Rapid succession of RPC then SMB connections = Invoke-WMIExec/SMBExec"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -211,7 +247,16 @@ Analyze Event ID 7045 (ServiceInstall), 7034 (ServiceCrash), 7036 (ServiceStateC
 - Flag: random service names (15+ chars, all caps, no spaces)
 - Flag: cmd/powershell in ImagePath
 - Flag: demand start services (often used for persistence)
-- Build service installation timeline"""
+- Build service installation timeline
+
+SMBEXEC/PSEXEC DETECTION (CRITICAL):
+- Invoke-SMBExec creates services with RANDOM 20-character UPPERCASE names (e.g., BTOBTOVAGGDXWCRQYEWL)
+- ImagePath often contains: %COMSPEC% /C powershell/cmd with encoded commands
+- These services execute and are immediately deleted
+- Rapid service install → service delete within seconds = SMBExec pattern
+- If you see multiple random-named services in sequence = coordinated lateral movement
+
+FLAG HIGH SEVERITY: Any service where ServiceName matches pattern [A-Z]{15,20} (random uppercase)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -244,7 +289,20 @@ Analyze authentication events:
 - 4672 (SpecialPrivileges), 4769 (KerberosTGS), 4771 (KerberosPreAuth), 4776 (CredentialValidation)
 - Group by LogonType: 2=interactive, 3=network, 10=RDP
 - Identify: brute force, password spraying, Kerberoasting (RC4), pass-the-hash
-- Build authentication timeline per user"""
+- Build authentication timeline per user
+
+PASS-THE-HASH DETECTION (CRITICAL):
+- NTLM authentication (4776) from non-standard workstations
+- LogonType 3 (network) with NTLM from compromised server to DC = lateral movement
+- Machine accounts ($) authenticating rapidly = potential automated attack
+- User authenticating from webserver IP immediately after webshell activity
+
+CREDENTIAL DUMPING INDICATORS:
+- After LSASS dump (pd.exe/procdump), watch for:
+  1. New authentications using same user credentials
+  2. Auth from different source IP than user's normal workstation
+  3. LogonType 3 following webshell command execution
+  4. Successful auth with no prior Kerberos TGT request (NTLM PTH)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -279,7 +337,21 @@ Analyze all evidence sources simultaneously:
 - Find network connections correlating with process creation
 - Establish lateral movement chain with evidence from BOTH sides
 - Identify credential reuse across systems
-- Build complete timeline spanning all systems"""
+- Build complete timeline spanning all systems
+
+PIVOT DETECTION (CRITICAL):
+- Track when attacker changes source IPs (external → internal)
+- Compare User-Agent strings across time (attacker tool changes)
+- Map: Web server compromise → credential harvest → lateral movement
+- Correlate IIS webshell commands with Sysmon process creation
+- Look for internal IPs (192.168.x, 10.x) appearing after external compromise
+
+LATERAL MOVEMENT CHAIN:
+1. Initial access (external IP to webshell)
+2. Credential dump (pd.exe/procdump on LSASS)
+3. Pivot to internal machine (new internal source IP)
+4. Lateral movement (SMB/WMI to domain controller)
+5. Domain compromise (service creation on DC)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -324,7 +396,19 @@ Analyze all PowerShell activity:
 - DECODE ALL encoded commands (-enc, -encodedcommand) - provide full base64 decode
 - Identify: bypass flags (-ep bypass, -nop), download commands (IEX, Invoke-WebRequest)
 - For web logs: decode URL-encoded PowerShell from query strings
-- Identify obfuscation techniques (string concatenation, variable substitution)"""
+- Identify obfuscation techniques (string concatenation, variable substitution)
+
+PASS-THE-HASH / INVOKE-THEHASH DETECTION (CRITICAL):
+- Look for: Invoke-WMIExec, Invoke-SMBExec, Invoke-Mimikatz, Invoke-TheHash
+- Common script names: iwe.ps1, ise.ps1, itm.ps1 (Invoke-WMIExec/SMBExec/TheMash)
+- Parameters to flag: -Hash (NTLM hash), -Target (IP), -Domain, -Username, -Command
+- NTLM hash pattern: 32 hex characters (e.g., 847bfb693121775ad21ba7e42d47fd07)
+- These indicate lateral movement via pass-the-hash technique
+
+WEBSHELL COMMAND DECODING (CRITICAL):
+- If base64 commands appear in HTTP query strings (cmd= parameter), decode them
+- Common webshell patterns: base64 → cmd.exe /c <command>
+- Track command sequence to build attacker activity timeline"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -361,7 +445,24 @@ Find anything other agents might miss:
 - Log tampering evidence
 - Anti-forensics indicators
 - Events just before/after log boundaries (first/last events)
-- Anything that looks out of place"""
+- Anything that looks out of place
+
+ATTACK INFRASTRUCTURE DETECTION:
+- 192.168.56.x network = VirtualBox host-only (common lab/attack setup)
+- Different User-Agent strings from same logical "attacker" (Windows → Linux)
+- Internal IPs appearing as sources mid-attack (pivot indicators)
+- Traffic patterns: external first, then internal-only (attacker pivot complete)
+
+DATA EXFILTRATION INDICATORS:
+- Files renamed to innocent names (dumpfile.dmp → cool_pic.png)
+- Large file downloads from internal paths
+- .dmp files moved to web-accessible directories
+- Archive creation (zip, rar) after data collection
+
+STEALTH INDICATORS:
+- Using legitimate tools for malicious purposes (Living off the Land)
+- ProcDump instead of Mimikatz (signed Microsoft tool)
+- cmd.exe spawned by w3wp.exe (webshell vs. GUI interaction)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
