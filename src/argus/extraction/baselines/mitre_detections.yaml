@@ -1,0 +1,264 @@
+# MITRE ATT&CK Detection Rules
+# Used by Stage 4.3: MITRE Technique Detector
+
+techniques:
+  # Credential Access
+  - technique_id: T1003.001
+    technique_name: "LSASS Memory"
+    tactic: "Credential Access"
+    required_indicators:
+      - procdump_lsass
+      - mimikatz
+    supporting_indicators:
+      - process_access_lsass
+      - suspicious_handle_lsass
+    description: "Credential dumping from LSASS memory"
+
+  - technique_id: T1003.002
+    technique_name: "Security Account Manager"
+    tactic: "Credential Access"
+    required_indicators:
+      - sam_dump
+    supporting_indicators:
+      - reg_save_sam
+      - secretsdump
+    description: "Credential dumping from SAM database"
+
+  - technique_id: T1003.003
+    technique_name: "NTDS"
+    tactic: "Credential Access"
+    required_indicators:
+      - ntds_dit
+    supporting_indicators:
+      - vssadmin_shadow
+      - ntdsutil
+    description: "Credential dumping from domain controller"
+
+  - technique_id: T1558.003
+    technique_name: "Kerberoasting"
+    tactic: "Credential Access"
+    required_indicators:
+      - high_volume_tgs_requests
+    supporting_indicators:
+      - service_account_enum
+    description: "Requesting service tickets for offline cracking"
+
+  # Execution
+  - technique_id: T1059.001
+    technique_name: "PowerShell"
+    tactic: "Execution"
+    required_indicators:
+      - encoded_powershell
+      - powershell_download
+    supporting_indicators:
+      - download_cradle
+      - invoke_expression
+    description: "PowerShell execution for code execution"
+
+  - technique_id: T1059.003
+    technique_name: "Windows Command Shell"
+    tactic: "Execution"
+    required_indicators:
+      - cmd_execution
+    supporting_indicators:
+      - cmd_from_unusual_parent
+    description: "Command shell execution"
+
+  - technique_id: T1047
+    technique_name: "Windows Management Instrumentation"
+    tactic: "Execution"
+    required_indicators:
+      - invoke_wmiexec
+      - wmic_process
+    supporting_indicators:
+      - wmiprvse_spawn
+    description: "WMI execution for lateral movement or persistence"
+
+  # Persistence
+  - technique_id: T1505.003
+    technique_name: "Web Shell"
+    tactic: "Persistence"
+    required_indicators:
+      - w3wp_child
+      - webshell_aspx
+    supporting_indicators:
+      - webshell_cmd_param
+      - iis_suspicious_uri
+    description: "Web shell installation for persistent access"
+
+  - technique_id: T1543.003
+    technique_name: "Windows Service"
+    tactic: "Persistence"
+    required_indicators:
+      - service_create
+      - event_7045
+    supporting_indicators:
+      - random_service_name
+      - service_cmd_execution
+    description: "Service creation for persistence"
+
+  - technique_id: T1053.005
+    technique_name: "Scheduled Task"
+    tactic: "Persistence"
+    required_indicators:
+      - schtasks_create
+      - event_4698
+    supporting_indicators:
+      - task_hidden
+      - task_runs_at_logon
+    description: "Scheduled task for persistence"
+
+  - technique_id: T1547.001
+    technique_name: "Registry Run Keys"
+    tactic: "Persistence"
+    required_indicators:
+      - reg_run_key
+    supporting_indicators:
+      - run_key_suspicious_value
+    description: "Registry run key modification for persistence"
+
+  # Lateral Movement
+  - technique_id: T1021.002
+    technique_name: "SMB/Windows Admin Shares"
+    tactic: "Lateral Movement"
+    required_indicators:
+      - invoke_smbexec
+      - psexec_service
+    supporting_indicators:
+      - random_service_name
+      - admin_share_access
+    description: "SMB-based lateral movement"
+
+  - technique_id: T1569.002
+    technique_name: "Service Execution"
+    tactic: "Execution"
+    required_indicators:
+      - psexec_execution
+      - remote_service_create
+    supporting_indicators:
+      - psexesvc_service
+    description: "Remote service-based execution"
+
+  - technique_id: T1021.006
+    technique_name: "Windows Remote Management"
+    tactic: "Lateral Movement"
+    required_indicators:
+      - winrm_connection
+      - enter_pssession
+    supporting_indicators:
+      - invoke_command_remote
+    description: "WinRM-based lateral movement"
+
+  # Defense Evasion
+  - technique_id: T1070.001
+    technique_name: "Clear Windows Event Logs"
+    tactic: "Defense Evasion"
+    required_indicators:
+      - event_log_clear
+      - event_1102
+    supporting_indicators:
+      - wevtutil_cl
+    description: "Event log clearing to hide evidence"
+
+  - technique_id: T1070.006
+    technique_name: "Timestomp"
+    tactic: "Defense Evasion"
+    required_indicators:
+      - timestomp
+    supporting_indicators:
+      - sysmon_2
+    description: "Timestamp modification to evade forensics"
+
+  - technique_id: T1562.001
+    technique_name: "Disable or Modify Tools"
+    tactic: "Defense Evasion"
+    required_indicators:
+      - disable_defender
+      - disable_firewall
+    supporting_indicators:
+      - tamper_protection_disabled
+    description: "Disabling security tools"
+
+  # Discovery
+  - technique_id: T1033
+    technique_name: "System Owner/User Discovery"
+    tactic: "Discovery"
+    required_indicators:
+      - recon_whoami
+    supporting_indicators:
+      - whoami_all
+    description: "Querying current user identity"
+
+  - technique_id: T1082
+    technique_name: "System Information Discovery"
+    tactic: "Discovery"
+    required_indicators:
+      - recon_systeminfo
+    supporting_indicators:
+      - wmic_os
+    description: "Querying system configuration"
+
+  - technique_id: T1087
+    technique_name: "Account Discovery"
+    tactic: "Discovery"
+    required_indicators:
+      - recon_net_user
+    supporting_indicators:
+      - net_localgroup
+      - net_group
+    description: "Enumerating user accounts"
+
+  - technique_id: T1016
+    technique_name: "System Network Configuration Discovery"
+    tactic: "Discovery"
+    required_indicators:
+      - recon_ipconfig
+      - recon_netstat
+    supporting_indicators:
+      - route_print
+      - arp_a
+    description: "Network configuration enumeration"
+
+  # Collection & Exfiltration
+  - technique_id: T1560
+    technique_name: "Archive Collected Data"
+    tactic: "Collection"
+    required_indicators:
+      - archive_compress
+    supporting_indicators:
+      - password_protected_archive
+      - staging_directory
+    description: "Compressing data for exfiltration"
+
+  - technique_id: T1105
+    technique_name: "Ingress Tool Transfer"
+    tactic: "Command and Control"
+    required_indicators:
+      - download_cradle
+      - certutil_download
+      - bitsadmin_download
+    supporting_indicators:
+      - wget_curl
+      - powershell_downloadstring
+    description: "Downloading tools to compromised system"
+
+  # Impact
+  - technique_id: T1486
+    technique_name: "Data Encrypted for Impact"
+    tactic: "Impact"
+    required_indicators:
+      - ransomware_extension
+    supporting_indicators:
+      - mass_file_encryption
+      - ransom_note
+    description: "Ransomware encryption activity"
+
+  - technique_id: T1490
+    technique_name: "Inhibit System Recovery"
+    tactic: "Impact"
+    required_indicators:
+      - volume_shadow_delete
+    supporting_indicators:
+      - bcdedit_recovery
+      - wbadmin_delete
+    description: "Deleting backups and recovery options"

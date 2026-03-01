@@ -1,0 +1,388 @@
+# Event ID Database for IR Analysis
+# Used by Stage 4.2: Event ID Analyzer
+
+# Security Event Log
+security_events:
+  4624:
+    name: "Successful Logon"
+    category: "Credential"
+    significance: INFO
+    expected_volume: 1000
+    description: "An account was successfully logged on"
+
+  4625:
+    name: "Failed Logon"
+    category: "Credential"
+    significance: MEDIUM
+    expected_volume: 50
+    description: "An account failed to log on"
+
+  4634:
+    name: "Logoff"
+    category: "Credential"
+    significance: INFO
+    expected_volume: 1000
+    description: "An account was logged off"
+
+  4648:
+    name: "Explicit Credential Logon"
+    category: "Credential"
+    significance: HIGH
+    expected_volume: 10
+    description: "A logon was attempted using explicit credentials"
+
+  4672:
+    name: "Admin Logon"
+    category: "Credential"
+    significance: MEDIUM
+    expected_volume: 100
+    description: "Special privileges assigned to new logon"
+
+  4688:
+    name: "Process Created"
+    category: "Execution"
+    significance: INFO
+    expected_volume: 5000
+    description: "A new process has been created"
+
+  4697:
+    name: "Service Installed"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "A service was installed in the system"
+
+  4698:
+    name: "Scheduled Task Created"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "A scheduled task was created"
+
+  4699:
+    name: "Scheduled Task Deleted"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 5
+    description: "A scheduled task was deleted"
+
+  4700:
+    name: "Scheduled Task Enabled"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 5
+    description: "A scheduled task was enabled"
+
+  4702:
+    name: "Scheduled Task Updated"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 10
+    description: "A scheduled task was updated"
+
+  4720:
+    name: "User Created"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 1
+    description: "A user account was created"
+
+  4722:
+    name: "User Enabled"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 2
+    description: "A user account was enabled"
+
+  4724:
+    name: "Password Reset"
+    category: "Credential"
+    significance: MEDIUM
+    expected_volume: 5
+    description: "An attempt was made to reset an account's password"
+
+  4728:
+    name: "User Added to Global Group"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 2
+    description: "A member was added to a security-enabled global group"
+
+  4732:
+    name: "User Added to Local Group"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 2
+    description: "A member was added to a security-enabled local group"
+
+  4756:
+    name: "User Added to Universal Group"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 2
+    description: "A member was added to a security-enabled universal group"
+
+  4768:
+    name: "Kerberos TGT Request"
+    category: "Credential"
+    significance: INFO
+    expected_volume: 500
+    description: "A Kerberos authentication ticket (TGT) was requested"
+
+  4769:
+    name: "Kerberos TGS Request"
+    category: "Credential"
+    significance: MEDIUM
+    expected_volume: 100
+    description: "A Kerberos service ticket was requested"
+    notes: "High volume may indicate Kerberoasting"
+
+  4771:
+    name: "Kerberos Pre-Auth Failed"
+    category: "Credential"
+    significance: HIGH
+    expected_volume: 10
+    description: "Kerberos pre-authentication failed"
+
+  4776:
+    name: "Credential Validation"
+    category: "Credential"
+    significance: INFO
+    expected_volume: 1000
+    description: "The domain controller attempted to validate credentials"
+
+  7045:
+    name: "Service Installed"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "A service was installed in the system (System log)"
+
+  1102:
+    name: "Audit Log Cleared"
+    category: "Defense Evasion"
+    significance: CRITICAL
+    expected_volume: 0
+    description: "The audit log was cleared"
+    notes: "Almost always malicious in an investigation context"
+
+# Sysmon Events
+sysmon_events:
+  1:
+    name: "Process Create"
+    category: "Execution"
+    significance: INFO
+    expected_volume: 5000
+    description: "Process creation with full command line"
+
+  2:
+    name: "File Creation Time Changed"
+    category: "Defense Evasion"
+    significance: HIGH
+    expected_volume: 10
+    description: "A process changed a file creation time (timestomping)"
+
+  3:
+    name: "Network Connection"
+    category: "Lateral"
+    significance: MEDIUM
+    expected_volume: 1000
+    description: "Network connection detected"
+
+  5:
+    name: "Process Terminated"
+    category: "Execution"
+    significance: LOW
+    expected_volume: 5000
+    description: "Process terminated"
+
+  6:
+    name: "Driver Loaded"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 50
+    description: "Driver loaded"
+
+  7:
+    name: "Image Loaded"
+    category: "Execution"
+    significance: LOW
+    expected_volume: 10000
+    description: "Image loaded (DLL)"
+
+  8:
+    name: "CreateRemoteThread"
+    category: "Execution"
+    significance: HIGH
+    expected_volume: 10
+    description: "CreateRemoteThread detected (injection indicator)"
+
+  9:
+    name: "RawAccessRead"
+    category: "Collection"
+    significance: HIGH
+    expected_volume: 5
+    description: "Raw disk access"
+
+  10:
+    name: "Process Access"
+    category: "Credential"
+    significance: MEDIUM
+    expected_volume: 100
+    description: "Process accessed"
+    notes: "LSASS access is a credential dump indicator"
+
+  11:
+    name: "File Create"
+    category: "Collection"
+    significance: LOW
+    expected_volume: 5000
+    description: "File created"
+
+  12:
+    name: "Registry Create/Delete"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 500
+    description: "Registry key or value created/deleted"
+
+  13:
+    name: "Registry Value Set"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 500
+    description: "Registry value modified"
+
+  14:
+    name: "Registry Rename"
+    category: "Persistence"
+    significance: MEDIUM
+    expected_volume: 50
+    description: "Registry key or value renamed"
+
+  15:
+    name: "File Stream Created"
+    category: "Collection"
+    significance: MEDIUM
+    expected_volume: 100
+    description: "Alternate data stream created"
+
+  17:
+    name: "Pipe Created"
+    category: "Lateral"
+    significance: MEDIUM
+    expected_volume: 50
+    description: "Named pipe created"
+
+  18:
+    name: "Pipe Connected"
+    category: "Lateral"
+    significance: MEDIUM
+    expected_volume: 50
+    description: "Pipe connection detected"
+
+  19:
+    name: "WMI Event Filter"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "WMI event filter activity"
+
+  20:
+    name: "WMI Event Consumer"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "WMI event consumer activity"
+
+  21:
+    name: "WMI Consumer Binding"
+    category: "Persistence"
+    significance: HIGH
+    expected_volume: 5
+    description: "WMI event consumer binding"
+
+  22:
+    name: "DNS Query"
+    category: "Discovery"
+    significance: LOW
+    expected_volume: 5000
+    description: "DNS query"
+
+  23:
+    name: "File Delete"
+    category: "Defense Evasion"
+    significance: LOW
+    expected_volume: 500
+    description: "File delete"
+
+  24:
+    name: "Clipboard Change"
+    category: "Collection"
+    significance: LOW
+    expected_volume: 100
+    description: "Clipboard content changed"
+
+  25:
+    name: "Process Tampering"
+    category: "Defense Evasion"
+    significance: HIGH
+    expected_volume: 5
+    description: "Process image change detected"
+
+  26:
+    name: "File Delete Logged"
+    category: "Defense Evasion"
+    significance: LOW
+    expected_volume: 500
+    description: "File delete archived"
+
+# IR Domain Mappings
+ir_domains:
+  Execution:
+    - 4688
+    - 1
+    - 7
+    - 8
+
+  Persistence:
+    - 4697
+    - 4698
+    - 4720
+    - 4732
+    - 7045
+    - 12
+    - 13
+    - 19
+    - 20
+    - 21
+
+  Credential Access:
+    - 4624
+    - 4625
+    - 4648
+    - 4768
+    - 4769
+    - 4771
+    - 4776
+    - 10
+
+  Lateral Movement:
+    - 3
+    - 17
+    - 18
+
+  Defense Evasion:
+    - 1102
+    - 2
+    - 23
+    - 25
+
+  Discovery:
+    - 22
+
+  Collection:
+    - 9
+    - 11
+    - 15
+    - 24

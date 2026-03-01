@@ -87,5 +87,10 @@ test-case/
 *.raw
 *.vmem
 
-# Local development files
+# Local development files (non-public)
 INTERVIEW_BACKUP.md
+ARCHITECTURE_ANALYSIS.md
+old-spec/
+
+# Parquet data files
+*.parquet

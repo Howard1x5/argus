@@ -273,6 +273,25 @@ case-001/
 └── output/ (Phase 8: final deliverables)
 ```
 
+### Public vs Non-Public Repository Content
+
+**Public (included in open-source repository):**
+- `src/argus/` — All production code (parsers, phases, agents, extraction, validation)
+- `tests/` — Unit and integration tests
+- `README.md`, `CONTRIBUTING.md`, `LICENSE`
+- `pyproject.toml`, `requirements.txt`
+- `SPEC_v1.1.md` — This specification document
+
+**Non-Public (excluded via .gitignore, kept locally):**
+- `~/.argus/` — User configuration, API keys, lessons learned
+- `case-*/` — All case directories with evidence and analysis
+- Legacy specification documents and development notes
+- Personal notes and preparation documents
+- Internal architecture analysis documents
+- Any files containing case data, client information, or sensitive findings
+
+**Rationale:** The tool itself is open-source and shareable. Case data, personal notes, and development artifacts that may contain sensitive information are never committed.
+
 ### Error Handling
 
 - Unparseable files: parse everything first, then flag with reasons
@@ -281,6 +300,36 @@ case-001/
 - API failures: exponential backoff, save progress, notify user
 - Contradictions: present both, never pick one
 - Extraction too large for LLM context: summarize by severity, note full data available
+
+### Development & Contribution Guidelines
+
+**Repository Structure:**
+
+This project uses a two-folder development model:
+- **Local development folder** — Working copies, private notes, case data, test evidence. No git remote configured.
+- **Public repository folder** — Production code only. Connected to GitHub.
+
+**Workflow:**
+1. All development happens in the local development folder
+2. When ready to publish, copy public files to the public repository folder
+3. Commit and push from the public repository only
+4. The local folder intentionally has no remote to prevent accidental pushes
+
+**Pre-commit Hook:**
+A pre-commit hook (`.githooks/pre-commit`) scans for accidental inclusion of:
+- Personal paths, home directories
+- API keys, tokens, credentials
+- Private IP addresses
+- Connection strings
+
+To enable: `git config core.hooksPath .githooks`
+
+**Commit Messages:**
+- Use conventional commit format: `type(scope): description`
+- Types: feat, fix, refactor, docs, test, chore
+- Keep messages concise and descriptive of the actual change
+- Do NOT include references to AI assistants, LLM tools, or code generation tools in commit messages
+- Commit messages should read as if written by the developer, describing what changed and why
 
 ### Domain Rules
 

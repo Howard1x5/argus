@@ -1,0 +1,129 @@
+# Process Parent-Child Baseline Configuration
+# Used by Stage 3.2: Parent-Child Classifier
+
+# Expected parent-child relationships (normal behavior)
+expected_parents:
+  # Browser processes
+  chrome.exe:
+    - explorer.exe
+    - chrome.exe
+  firefox.exe:
+    - explorer.exe
+    - firefox.exe
+  msedge.exe:
+    - explorer.exe
+    - msedge.exe
+  iexplore.exe:
+    - explorer.exe
+
+  # System processes
+  svchost.exe:
+    - services.exe
+  csrss.exe:
+    - smss.exe
+  wininit.exe:
+    - smss.exe
+  winlogon.exe:
+    - smss.exe
+  lsass.exe:
+    - wininit.exe
+  services.exe:
+    - wininit.exe
+  explorer.exe:
+    - userinit.exe
+    - winlogon.exe
+  dwm.exe:
+    - winlogon.exe
+
+  # Common applications
+  notepad.exe:
+    - explorer.exe
+    - cmd.exe
+    - powershell.exe
+  calc.exe:
+    - explorer.exe
+  mspaint.exe:
+    - explorer.exe
+  wordpad.exe:
+    - explorer.exe
+
+  # Office applications
+  winword.exe:
+    - explorer.exe
+  excel.exe:
+    - explorer.exe
+  powerpnt.exe:
+    - explorer.exe
+  outlook.exe:
+    - explorer.exe
+
+# Processes that should rarely spawn children (suspicious if they do)
+rarely_spawn_children:
+  - w3wp.exe          # IIS worker - webshell indicator
+  - httpd.exe         # Apache
+  - nginx.exe         # Nginx
+  - tomcat.exe        # Tomcat
+  - sqlservr.exe      # SQL Server
+  - oracle.exe        # Oracle DB
+  - mysqld.exe        # MySQL
+  - postgres.exe      # PostgreSQL
+  - lsass.exe         # LSASS shouldn't spawn children
+  - spoolsv.exe       # Print spooler
+
+# Always suspicious parent-child combinations
+always_suspicious:
+  # Web server spawning shell
+  - parent: w3wp.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+      - pwsh.exe
+      - whoami.exe
+      - net.exe
+      - net1.exe
+      - ipconfig.exe
+      - systeminfo.exe
+      - hostname.exe
+      - tasklist.exe
+
+  # SQL injection indicators
+  - parent: sqlservr.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+      - xp_cmdshell.exe
+
+  # Macro-enabled document exploitation
+  - parent: winword.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+      - mshta.exe
+      - cscript.exe
+      - wscript.exe
+
+  - parent: excel.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+      - mshta.exe
+      - cscript.exe
+      - wscript.exe
+
+  # Email client exploitation
+  - parent: outlook.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+      - mshta.exe
+
+  # PDF exploitation
+  - parent: acrord32.exe
+    children:
+      - cmd.exe
+      - powershell.exe
+
+  - parent: foxitreader.exe
+    children:
+      - cmd.exe
+      - powershell.exe
