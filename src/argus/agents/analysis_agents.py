@@ -20,6 +20,7 @@ from typing import Optional
 import click
 
 from argus.agents.base import BaseAgent, AgentResult
+from argus.agents.investigation_playbooks import get_playbook_context
 
 
 # Base system prompt for analysis agents
@@ -89,7 +90,26 @@ CREDENTIAL DUMPING DETECTION:
 - Flag pd.exe, procdump.exe, procdump64.exe execution
 - Flag ANY process with command line containing "lsass" or "-ma" (memory dump)
 - ProcDump with "-accepteula -ma <pid>" targeting LSASS = credential harvesting
-- Look for output files: .dmp files, especially in Public, Temp folders"""
+- Look for output files: .dmp files, especially in Public, Temp folders
+
+WEBSHELL COMMAND ANALYSIS (correlate with IIS logs if available):
+1. Build w3wp.exe child process timeline
+2. For each cmd.exe/powershell.exe child, extract:
+   - Timestamp, command line, user context
+   - Parent PID (should be w3wp.exe)
+3. Categorize commands by attack phase:
+   - Reconnaissance: whoami, ipconfig, net user, nltest, tasklist, netstat
+   - Privilege check: whoami /priv, net localgroup Administrators
+   - Discovery: wmic process list, dir /s, systeminfo
+   - Credential access: pd.exe, procdump, mimikatz patterns
+   - Lateral movement: Invoke-WMIExec, Invoke-SMBExec, psexec
+4. Note command sophistication progression (recon → cred dump → lateral)
+
+PROCESS TREE TIMELINE:
+- Build chronological list of ALL w3wp.exe children
+- Identify gaps >15 minutes between commands (attacker pauses)
+- After gaps, look for: different command style, new techniques
+- Count total webshell commands to assess attacker activity level"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -136,7 +156,22 @@ ATTACK TOOL STAGING:
 - iwe.ps1, ise.ps1 = Invoke-WMIExec/SMBExec (Invoke-TheHash toolkit)
 - mimikatz, m.exe, kiwi = credential dumping
 - Files renamed to hide purpose: cool_pic.png (was dumpfile.dmp)
-- .dmp files = memory dumps (likely LSASS credentials)"""
+- .dmp files = memory dumps (likely LSASS credentials)
+
+CREDENTIAL EXFILTRATION CHAIN (track full lifecycle):
+Phase 1 - Dump: ProcDump creates .dmp file (look for pd.exe -ma)
+Phase 2 - Disguise: File renamed to innocent extension (.png, .jpg, .txt, .log)
+  * Pattern: `move <original>.dmp <disguised>.png`
+  * Location change: C:\\Users\\Public → C:\\inetpub\\wwwroot (web-accessible)
+Phase 3 - Exfil: HTTP download of disguised file
+  * In IIS logs: GET /uploads/<disguised_file> from INTERNAL IP
+  * Large file (>1MB) download from unusual path
+Phase 4 - Credential Use: Watch for Invoke-SMBExec/WMIExec with -Hash parameter
+
+FILE DOWNLOAD TRACKING (IIS correlation):
+- Match Sysmon file creation with IIS access logs
+- Track: timestamp of file create → timestamp of download → client IP
+- Flag downloads from internal IPs (pivot machine exfiltrating data)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -213,7 +248,23 @@ LATERAL MOVEMENT DETECTION (CRITICAL):
 
 PASS-THE-HASH INDICATORS:
 - PowerShell.exe making SMB (445) or RPC (135) connections to domain controller
-- Rapid succession of RPC then SMB connections = Invoke-WMIExec/SMBExec"""
+- Rapid succession of RPC then SMB connections = Invoke-WMIExec/SMBExec
+
+ATTACKER PIVOT DETECTION (from IIS/Web logs):
+- Track unique source IPs (c-ip) accessing webshells or admin panels
+- Flag when SAME resource accessed from different IP ranges:
+  * External (45.x, public IPs) → Internal (192.168.x, 10.x) = PIVOT OCCURRED
+- User-Agent fingerprinting:
+  * Windows UA → Linux UA = attacker switched to attack VM (likely Kali)
+  * "Mozilla/5.0 (X11; Linux x86_64)" = common Kali/attack machine fingerprint
+- VirtualBox network: 192.168.56.x is default host-only network
+  * 192.168.56.1 = typically VirtualBox HOST machine
+  * If Linux UA from .1 accessing Windows server = attacker VM
+
+TIMELINE GAP ANALYSIS:
+- Note gaps >15 minutes in attacker activity
+- After gaps, check for: new source IP, different User-Agent, more sophisticated commands
+- Gap pattern: credential dump → offline cracking → return with new access"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -302,7 +353,26 @@ CREDENTIAL DUMPING INDICATORS:
   1. New authentications using same user credentials
   2. Auth from different source IP than user's normal workstation
   3. LogonType 3 following webshell command execution
-  4. Successful auth with no prior Kerberos TGT request (NTLM PTH)"""
+  4. Successful auth with no prior Kerberos TGT request (NTLM PTH)
+
+POST-CREDENTIAL-DUMP TIMELINE:
+1. Identify credential dump timestamp (ProcDump/mimikatz execution)
+2. Search for authentications AFTER that timestamp using extracted credentials
+3. Pattern: dump at T1 → auth from new IP at T2 → lateral movement at T3
+4. The source IP at T2 reveals attacker's pivot machine
+
+AUTHENTICATION SOURCE ANALYSIS:
+- Map which IPs each user authenticates from
+- Flag: user authenticating from webserver IP (WEB01$, or user from IIS context)
+- Flag: internal IP appearing after external-only activity
+- Correlate with User-Agent if IIS logs available (Linux UA = pivot machine)
+
+ATTACK PHASE MARKERS IN AUTH LOGS:
+1. Initial compromise: IIS AppPool account activity
+2. Privilege escalation: Administrator/SYSTEM appearing
+3. Credential harvest: No direct auth marker, but gap before lateral movement
+4. Lateral movement: Target user (e.g., 'eugene') authenticating from web server IP
+5. Domain compromise: Admin auth to DC from internal attacker IP"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -351,12 +421,40 @@ LATERAL MOVEMENT CHAIN:
 2. Credential dump (pd.exe/procdump on LSASS)
 3. Pivot to internal machine (new internal source IP)
 4. Lateral movement (SMB/WMI to domain controller)
-5. Domain compromise (service creation on DC)"""
+5. Domain compromise (service creation on DC)
+
+EVIDENCE CORRELATION MATRIX (cross-reference these):
+- IIS Logs: HTTP requests with timestamps and client IPs (c-ip column)
+- Sysmon Event 1: Process creation with command lines
+- Sysmon Event 3: Network connections with source/dest IPs
+- Sysmon Event 11: File creation with timestamps
+- Security Events 4624/4625: Authentication with source IPs
+
+CROSS-REFERENCE METHODOLOGY:
+1. IIS request timestamp → Sysmon process within 2 seconds (same command)
+2. Sysmon process PID → Sysmon network connection (same PID)
+3. Auth event → subsequent process creation (same user, ~seconds later)
+4. File creation timestamp → IIS download (same filename, later time)
+
+TIMELINE GAP ANALYSIS:
+1. Build chronological activity timeline per source IP
+2. Identify quiet periods (>15 minutes gap)
+3. After gaps, look for:
+   - New source IP appearing (pivot complete)
+   - Different User-Agent (new machine)
+   - More sophisticated commands (credentials obtained)
+4. Gap often means: credential extraction → offline cracking → return
+
+MULTI-SYSTEM ATTACK FLOW:
+Track commands that reference OTHER systems:
+- `-Target 192.168.56.10` = attacking DC from web server
+- Commands mentioning hostnames (DCSRV, WEB01)
+- Correlate with destination system's logs for matching activity"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
-        
+
         # Group by source system
         by_system = {}
         for e in events:
@@ -364,18 +462,45 @@ LATERAL MOVEMENT CHAIN:
             if system not in by_system:
                 by_system[system] = []
             by_system[system].append(e)
-        
+
+        # Extract IIS events for webshell analysis
+        iis_events = [e for e in events if
+            e.get("parser_name") == "iis" or
+            "iis" in str(e.get("source_file", "")).lower() or
+            e.get("http_method")]
+
+        # Extract unique source IPs from IIS logs
+        source_ips = set()
+        for e in iis_events:
+            if e.get("source_ip"):
+                source_ips.add(e.get("source_ip"))
+
         prompt = f"""## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
 ## Systems Found: {list(by_system.keys())}
 
+## IIS/Web Log Analysis
+- Total web requests: {len(iis_events)}
+- Unique source IPs (clients): {list(source_ips)[:20]}
+
+### IIS Events (for pivot detection - check client IPs and User-Agents):
+{json.dumps(iis_events[:30], indent=2, default=str)}
+
 ## Events by System (samples):
 """
         for system, sys_events in list(by_system.items())[:5]:
             prompt += f"\n### {system} ({len(sys_events)} events)\n{json.dumps(sys_events[:20], indent=2, default=str)}\n"
-        
-        prompt += "\nCorrelate activity across systems. Map the attack path. Identify lateral movement."
+
+        prompt += """
+Correlate activity across systems. Map the attack path. Identify lateral movement.
+
+KEY ANALYSIS TASKS:
+1. Track source IP changes in IIS logs (external → internal = pivot)
+2. Correlate IIS requests with Sysmon process creation (webshell commands)
+3. Map credential dump timestamps to subsequent authentications
+4. Build cross-system timeline showing attack flow between hosts
+"""
         return prompt
 
 
@@ -408,7 +533,29 @@ PASS-THE-HASH / INVOKE-THEHASH DETECTION (CRITICAL):
 WEBSHELL COMMAND DECODING (CRITICAL):
 - If base64 commands appear in HTTP query strings (cmd= parameter), decode them
 - Common webshell patterns: base64 → cmd.exe /c <command>
-- Track command sequence to build attacker activity timeline"""
+- Track command sequence to build attacker activity timeline
+
+BASE64 EXTRACTION AND DECODING:
+1. In IIS logs, look for query string: cmd=<base64>
+2. Decode each base64 value to reveal actual command
+3. Build chronological command list with timestamps and source IPs
+4. Group decoded commands by attack phase:
+   - Recon: whoami, ipconfig, net user, net localgroup, nltest
+   - Discovery: tasklist /v, netstat -ano, wmic process list
+   - Credential: pd.exe -accepteula -ma <pid>, procdump
+   - Lateral: Invoke-WMIExec, Invoke-SMBExec with -Hash parameter
+
+LATERAL MOVEMENT COMMAND PATTERNS:
+Look for these specific command structures:
+- `Invoke-WMIExec -Target <IP> -Domain <domain> -Username <user> -Hash <32hex> -Command '<cmd>'`
+- `Invoke-SMBExec -Target <IP> -Hash <hash> -Command '<cmd>'`
+- PowerShell downloading scripts: `Invoke-WebRequest -Uri '<url>' -OutFile '<path>'`
+- Execution of downloaded scripts: `-ExecutionPolicy Bypass -File <downloaded.ps1>`
+
+PAYLOAD URL TRACKING:
+- Extract URLs from Invoke-WebRequest, wget, curl commands
+- Common malicious sources: pastebin.com/raw/, github raw, transfer.sh
+- Track: URL → downloaded filename → execution timestamp"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
@@ -449,20 +596,41 @@ Find anything other agents might miss:
 
 ATTACK INFRASTRUCTURE DETECTION:
 - 192.168.56.x network = VirtualBox host-only (common lab/attack setup)
+  * 192.168.56.1 = typically the VirtualBox HOST machine
+  * If this IP appears with Linux User-Agent = attacker's attack VM
 - Different User-Agent strings from same logical "attacker" (Windows → Linux)
 - Internal IPs appearing as sources mid-attack (pivot indicators)
 - Traffic patterns: external first, then internal-only (attacker pivot complete)
+
+VM/HYPERVISOR DETECTION:
+- Look for: Get-VMSwitch, vmcompute, vboxsvc, VBoxHeadless processes
+- Hyper-V cmdlets in PowerShell (Get-VM, New-VM)
+- VirtualBox processes being started during attack window
+- Network adapter changes (new virtual NICs)
 
 DATA EXFILTRATION INDICATORS:
 - Files renamed to innocent names (dumpfile.dmp → cool_pic.png)
 - Large file downloads from internal paths
 - .dmp files moved to web-accessible directories
 - Archive creation (zip, rar) after data collection
+- Downloads from pastebin.com, github raw, transfer.sh (payload staging)
 
 STEALTH INDICATORS:
 - Using legitimate tools for malicious purposes (Living off the Land)
 - ProcDump instead of Mimikatz (signed Microsoft tool)
-- cmd.exe spawned by w3wp.exe (webshell vs. GUI interaction)"""
+- cmd.exe spawned by w3wp.exe (webshell vs. GUI interaction)
+
+USER-AGENT ANOMALIES:
+- Track User-Agent changes per source IP
+- Flag: Windows UA → Linux UA (platform switch = new attack machine)
+- "Mozilla/5.0 (X11; Linux x86_64)" from internal IP = likely Kali VM
+- "python-requests", "curl", "wget" = scripted/automated attacks
+
+TIMELINE ANOMALY DETECTION:
+- Activity bursts followed by long gaps (>15 minutes)
+- Sudden change in command sophistication after gaps
+- New source IPs appearing after credential dump events
+- Correlate gaps with file exfil timestamps (offline analysis period)"""
     
     def build_user_prompt(self, context: dict) -> str:
         events = context.get("events", [])
