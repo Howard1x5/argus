@@ -242,14 +242,15 @@ class ForensicExtractor:
         return result
 
     # =========================================================================
-    # EXTRACTION 2: Web Attacks
+    # EXTRACTION 2: Web Attacks (including SMB file transfers)
     # =========================================================================
     def extract_web_attacks(self) -> dict:
-        """Extract ALL web attack indicators from IIS/web logs."""
+        """Extract ALL web attack indicators from IIS/web logs and SMB file transfers."""
         click.echo("  Extracting web attacks...")
 
         events = self.load_all_events()
         web_events = []
+        smb_events = []
 
         # Find all web events
         for event in events:
@@ -258,6 +259,21 @@ class ForensicExtractor:
                 event.get("uri") or
                 "iis" in str(event.get("_source_parquet", "")).lower()):
                 web_events.append(event)
+
+        # Find all SMB events (from PCAP parser)
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "smb" in event_type or event.get("parser_name") == "pcap":
+                raw_payload = event.get("raw_payload", "")
+                # Check if raw_payload contains SMB data (JSON format)
+                if raw_payload and isinstance(raw_payload, str):
+                    if "tree_path" in raw_payload or "filename" in raw_payload:
+                        try:
+                            smb_data = json.loads(raw_payload)
+                            event["_smb_data"] = smb_data
+                            smb_events.append(event)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
 
         # Suspicious URI access
         suspicious_uris = []
@@ -306,6 +322,54 @@ class ForensicExtractor:
             elif ip:
                 external_ips.append(ip)
 
+        # =================================================================
+        # SMB File Transfers (Q3, Q4 from walkthrough)
+        # =================================================================
+        smb_tree_connects = []
+        smb_file_writes = []
+        suspicious_smb_files = []
+
+        # Suspicious file extensions for SMB uploads
+        suspicious_extensions = {".aspx", ".asp", ".jsp", ".php", ".exe", ".dll", ".ps1", ".bat", ".cmd"}
+
+        for event in smb_events:
+            smb_data = event.get("_smb_data", {})
+            tree_path = smb_data.get("tree_path")
+            filename = smb_data.get("filename")
+            write_length = smb_data.get("write_length")
+
+            # Track tree connects (UNC paths - Q3)
+            if tree_path:
+                smb_tree_connects.append({
+                    "timestamp": str(event.get("timestamp_utc", "")),
+                    "source_ip": event.get("source_ip"),
+                    "dest_ip": event.get("dest_ip"),
+                    "unc_path": tree_path,
+                    "source_file": event.get("_source_parquet"),
+                })
+
+            # Track file writes (Q4)
+            if filename and write_length:
+                file_info = {
+                    "timestamp": str(event.get("timestamp_utc", "")),
+                    "source_ip": event.get("source_ip"),
+                    "dest_ip": event.get("dest_ip"),
+                    "filename": filename,
+                    "write_length": write_length,
+                    "tree_path": tree_path,
+                    "source_file": event.get("_source_parquet"),
+                }
+                smb_file_writes.append(file_info)
+
+                # Check for suspicious file types
+                ext = Path(str(filename)).suffix.lower()
+                if ext in suspicious_extensions:
+                    file_info["indicator"] = f"suspicious_extension_{ext}"
+                    suspicious_smb_files.append(file_info)
+
+        # Get unique UNC paths
+        unique_unc_paths = list(set(tc["unc_path"] for tc in smb_tree_connects if tc.get("unc_path")))
+
         result = {
             "total_web_events": len(web_events),
             "webshell_access": webshell_access,
@@ -316,10 +380,19 @@ class ForensicExtractor:
             "external_ips": external_ips,
             "internal_ips": internal_ips,
             "pivot_detected": len(external_ips) > 0 and len(internal_ips) > 0,
+            # SMB findings
+            "smb_events_count": len(smb_events),
+            "smb_tree_connects": smb_tree_connects,
+            "smb_tree_connects_count": len(smb_tree_connects),
+            "unique_unc_paths": unique_unc_paths,
+            "smb_file_writes": smb_file_writes,
+            "smb_file_writes_count": len(smb_file_writes),
+            "suspicious_smb_files": suspicious_smb_files,
+            "suspicious_smb_files_count": len(suspicious_smb_files),
         }
 
         self._save_extraction("web_attacks.json", result)
-        click.echo(f"    Found {len(webshell_access)} webshell accesses, pivot_detected={result['pivot_detected']}")
+        click.echo(f"    Found {len(webshell_access)} webshell accesses, {len(smb_file_writes)} SMB file writes, pivot_detected={result['pivot_detected']}")
 
         return result
 

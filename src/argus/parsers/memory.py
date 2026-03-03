@@ -81,11 +81,13 @@ class MemoryParser(BaseParser):
 
     # Volatility plugins to run for triage
     TRIAGE_PLUGINS = [
-        "windows.pslist",
-        "windows.pstree",
-        "windows.cmdline",
-        "windows.netscan",
-        "windows.malfind",
+        "windows.info",       # System metadata, kernel base address (fast, run first)
+        "windows.pslist",     # Process list
+        "windows.pstree",     # Process tree
+        "windows.cmdline",    # Command lines
+        "windows.netscan",    # Network connections
+        "windows.malfind",    # Injected code detection
+        "windows.filescan",   # Find files in memory
     ]
 
     @classmethod
@@ -313,7 +315,21 @@ class MemoryParser(BaseParser):
         )
 
         # Plugin-specific parsing
-        if "pslist" in plugin or "pstree" in plugin:
+        if "info" in plugin:
+            # windows.info returns key-value pairs about system metadata
+            # Format: {"Variable": "Kernel Base", "Value": "0xf80002a48000"}
+            variable = record.get("Variable", "")
+            value = record.get("Value", "")
+            event.event_type = "Memory_system_info"
+            # Store info variable in process_name field for easy access
+            event.process_name = variable
+            # Store value in command_line field
+            event.command_line = str(value)
+            # Also store raw for complete data
+            event.raw_payload = json.dumps({"variable": variable, "value": value})
+            return event
+
+        elif "pslist" in plugin or "pstree" in plugin:
             event.process_name = record.get("ImageFileName") or record.get("Name")
             event.process_id = record.get("PID")
             event.parent_process_id = record.get("PPID")
@@ -337,7 +353,19 @@ class MemoryParser(BaseParser):
             event.process_id = record.get("PID")
             event.severity = EventSeverity.HIGH  # Malfind hits are suspicious
 
-        # Store raw record
-        event.raw_payload = json.dumps(record)
+        elif "filescan" in plugin:
+            # windows.filescan returns file objects in memory
+            event.process_name = record.get("Name", "")  # File path
+            event.command_line = record.get("Name", "")  # Also store in command_line
+            # Store offset for forensic reference
+            event.raw_payload = json.dumps({
+                "offset": record.get("Offset"),
+                "name": record.get("Name"),
+                "size": record.get("Size"),
+            })
+
+        # Store raw record for all other plugins
+        if not event.raw_payload:
+            event.raw_payload = json.dumps(record)
 
         return event

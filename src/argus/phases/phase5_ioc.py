@@ -140,10 +140,10 @@ def enrich_with_virustotal(ioc: str, ioc_type: str, api_key: str) -> Optional[di
     """Enrich IOC with VirusTotal data."""
     try:
         import requests
-        
+
         base_url = "https://www.virustotal.com/api/v3"
         headers = {"x-apikey": api_key}
-        
+
         if ioc_type == "ipv4":
             url = f"{base_url}/ip_addresses/{ioc}"
         elif ioc_type == "domain":
@@ -152,26 +152,81 @@ def enrich_with_virustotal(ioc: str, ioc_type: str, api_key: str) -> Optional[di
             url = f"{base_url}/files/{ioc}"
         else:
             return None
-        
+
         response = requests.get(url, headers=headers, timeout=10)
-        
+
         if response.status_code == 200:
             data = response.json().get("data", {}).get("attributes", {})
             stats = data.get("last_analysis_stats", {})
-            return {
+
+            result = {
                 "source": "virustotal",
                 "malicious": stats.get("malicious", 0),
                 "suspicious": stats.get("suspicious", 0),
                 "harmless": stats.get("harmless", 0),
                 "reputation": data.get("reputation", 0),
             }
+
+            # For file hashes, extract malware family (Q11)
+            if ioc_type in ["md5", "sha1", "sha256"]:
+                threat_class = data.get("popular_threat_classification", {})
+                if threat_class:
+                    result["malware_family"] = threat_class.get("suggested_threat_label", "")
+                    result["malware_category"] = threat_class.get("popular_threat_category", [])
+                # Also get file names
+                result["names"] = data.get("names", [])[:5]  # First 5 names
+                result["tags"] = data.get("tags", [])
+
+            return result
         elif response.status_code == 429:
             time.sleep(60)  # Rate limited, wait
             return None
-            
+
     except Exception:
         pass
-    
+
+    return None
+
+
+def enrich_hash_relations(file_hash: str, api_key: str) -> Optional[dict]:
+    """Get contacted domains/IPs for a file hash (Q10 - C2 discovery)."""
+    try:
+        import requests
+
+        base_url = "https://www.virustotal.com/api/v3"
+        headers = {"x-apikey": api_key}
+
+        # Get contacted domains
+        domains_url = f"{base_url}/files/{file_hash}/contacted_domains"
+        domains_response = requests.get(domains_url, headers=headers, timeout=10)
+
+        contacted_domains = []
+        if domains_response.status_code == 200:
+            domains_data = domains_response.json().get("data", [])
+            for item in domains_data[:10]:  # First 10 domains
+                contacted_domains.append(item.get("id", ""))
+
+        # Get contacted IPs
+        time.sleep(0.25)  # Rate limit
+        ips_url = f"{base_url}/files/{file_hash}/contacted_ips"
+        ips_response = requests.get(ips_url, headers=headers, timeout=10)
+
+        contacted_ips = []
+        if ips_response.status_code == 200:
+            ips_data = ips_response.json().get("data", [])
+            for item in ips_data[:10]:  # First 10 IPs
+                contacted_ips.append(item.get("id", ""))
+
+        return {
+            "source": "virustotal_relations",
+            "hash": file_hash,
+            "contacted_domains": contacted_domains,
+            "contacted_ips": contacted_ips,
+        }
+
+    except Exception:
+        pass
+
     return None
 
 
@@ -316,6 +371,34 @@ def run_ioc_extraction(case_path_str: str) -> bool:
                 if vt_data:
                     ioc_record["enrichment"].append(vt_data)
                     enriched_count += 1
+
+                    # For file hashes, also get relations (C2 domains/IPs)
+                    if ioc_type in ["md5", "sha1", "sha256"] and vt_data.get("malicious", 0) > 0:
+                        time.sleep(0.25)  # Rate limit
+                        relations = enrich_hash_relations(ioc, vt_key)
+                        if relations and (relations.get("contacted_domains") or relations.get("contacted_ips")):
+                            ioc_record["enrichment"].append(relations)
+                            # Add discovered C2 domains/IPs as new IOCs
+                            for domain in relations.get("contacted_domains", []):
+                                if domain and domain not in [r["value"] for r in ioc_records]:
+                                    ioc_records.append({
+                                        "type": "domain",
+                                        "value": domain,
+                                        "context": f"C2 domain from VT relations for {ioc[:16]}...",
+                                        "first_seen": datetime.now(timezone.utc).isoformat(),
+                                        "enrichment": [],
+                                        "risk_score": 75,  # High risk - C2 indicator
+                                    })
+                            for ip in relations.get("contacted_ips", []):
+                                if ip and ip not in [r["value"] for r in ioc_records]:
+                                    ioc_records.append({
+                                        "type": "ipv4",
+                                        "value": ip,
+                                        "context": f"C2 IP from VT relations for {ioc[:16]}...",
+                                        "first_seen": datetime.now(timezone.utc).isoformat(),
+                                        "enrichment": [],
+                                        "risk_score": 75,  # High risk - C2 indicator
+                                    })
                 time.sleep(0.25)  # Rate limit
             
             # AbuseIPDB

@@ -73,6 +73,16 @@ class PCAPParser(BaseParser):
                 "-e", "dns.qry.name",
                 "-e", "dns.a",
                 "-e", "tls.handshake.extensions_server_name",
+                # SMB2 fields for file transfer and share enumeration
+                "-e", "smb2.tree",
+                "-e", "smb2.filename",
+                "-e", "smb2.write_length",
+                "-e", "smb2.cmd",
+                "-e", "smb2.flags",
+                # SMB1 fields for backwards compatibility
+                "-e", "smb.path",
+                "-e", "smb.file",
+                "-e", "smb.cmd",
             ]
 
             proc = subprocess.run(
@@ -184,8 +194,42 @@ class PCAPParser(BaseParser):
             event.uri = tls_sni
             event.event_type = "PCAP_TLS"
 
-        # Store protocols string
-        event.raw_payload = protocols
+        # SMB2 fields
+        smb2_tree = layers.get("smb2_tree", [None])[0]
+        smb2_filename = layers.get("smb2_filename", [None])[0]
+        smb2_write_length = layers.get("smb2_write_length", [None])[0]
+        smb2_cmd = layers.get("smb2_cmd", [None])[0]
+
+        # SMB1 fields (fallback)
+        smb_path = layers.get("smb_path", [None])[0]
+        smb_file = layers.get("smb_file", [None])[0]
+        smb_cmd = layers.get("smb_cmd", [None])[0]
+
+        # Use SMB2 first, fallback to SMB1
+        smb_tree_path = smb2_tree or smb_path
+        smb_filename = smb2_filename or smb_file
+
+        if smb_tree_path or smb_filename:
+            event.event_type = "PCAP_SMB"
+            # Store SMB-specific data in raw_payload as JSON
+            smb_data = {
+                "tree_path": smb_tree_path,
+                "filename": smb_filename,
+                "write_length": smb2_write_length,
+                "smb_cmd": smb2_cmd or smb_cmd,
+            }
+            # Filter out None values
+            smb_data = {k: v for k, v in smb_data.items() if v is not None}
+            if smb_data:
+                event.raw_payload = json.dumps(smb_data)
+                # Also store in URI for easier access
+                if smb_filename:
+                    event.uri = smb_filename
+                elif smb_tree_path:
+                    event.uri = smb_tree_path
+        else:
+            # Store protocols string for non-SMB packets
+            event.raw_payload = protocols
 
         return event
 
@@ -204,7 +248,9 @@ class PCAPParser(BaseParser):
         """Determine event type from protocol string."""
         protocols_lower = protocols.lower()
 
-        if "http" in protocols_lower:
+        if "smb" in protocols_lower or "smb2" in protocols_lower:
+            return "SMB"
+        elif "http" in protocols_lower:
             return "HTTP"
         elif "dns" in protocols_lower:
             return "DNS"
