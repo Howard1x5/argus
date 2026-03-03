@@ -43,6 +43,7 @@ dependencies = [
     # Evidence parsing
     "python-evtx>=0.8",
     "regipy>=4.0",
+    "pefile>=2023.2.7",
 
     # LLM
     "anthropic>=0.18",

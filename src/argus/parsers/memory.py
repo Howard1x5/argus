@@ -4,6 +4,8 @@ Parses memory dumps using Volatility 3 subprocess.
 """
 
 import json
+import logging
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -11,6 +13,56 @@ from pathlib import Path
 from typing import Optional
 
 from argus.parsers.base import BaseParser, ParseResult, UnifiedEvent, EventSeverity
+
+logger = logging.getLogger(__name__)
+
+# Common locations for Volatility3 symbol files
+SYMBOL_SEARCH_PATHS = [
+    Path.home() / "volatility3_symbols",
+    Path.home() / ".volatility3" / "symbols",
+    Path("/opt/volatility3/symbols"),
+    Path("/usr/share/volatility3/symbols"),
+]
+
+
+def _find_symbols_path(case_config: Optional[dict] = None) -> Optional[Path]:
+    """Find Volatility3 symbols directory.
+
+    Priority: case config > global config > env var > common paths.
+    """
+    # 1. Check case config
+    if case_config and "volatility_symbols_path" in case_config:
+        p = Path(case_config["volatility_symbols_path"])
+        if p.exists() and p.is_dir():
+            return p
+
+    # 2. Check global ARGUS config
+    global_config = Path.home() / ".argus" / "config.yaml"
+    if global_config.exists():
+        try:
+            import yaml
+            with open(global_config) as f:
+                cfg = yaml.safe_load(f)
+            if cfg and "volatility_symbols_path" in cfg:
+                p = Path(cfg["volatility_symbols_path"])
+                if p.exists() and p.is_dir():
+                    return p
+        except Exception:
+            pass
+
+    # 3. Check environment variable
+    env_path = os.environ.get("VOLATILITY_SYMBOLS_PATH")
+    if env_path:
+        p = Path(env_path)
+        if p.exists() and p.is_dir():
+            return p
+
+    # 4. Check common locations
+    for path in SYMBOL_SEARCH_PATHS:
+        if path.exists() and path.is_dir():
+            return path
+
+    return None
 
 
 class MemoryParser(BaseParser):
@@ -82,51 +134,114 @@ class MemoryParser(BaseParser):
             return result
 
         vol_cmd = self._get_vol_command()
+
+        # Find symbols path
+        symbols_path = _find_symbols_path()
+        if symbols_path:
+            logger.info(f"Using Volatility symbols from: {symbols_path}")
+        else:
+            logger.warning(
+                "No Volatility3 symbols directory found. "
+                "Memory parsing will likely fail. "
+                "Set VOLATILITY_SYMBOLS_PATH env var or place symbols in ~/volatility3_symbols/"
+            )
+            result.add_warning(
+                "No Volatility symbols found - memory parsing may fail. "
+                "Set VOLATILITY_SYMBOLS_PATH or install symbols to ~/volatility3_symbols/"
+            )
+
         line_num = 0
+        file_size_gb = file_path.stat().st_size / (1024**3)
 
         # Run triage plugins
         for plugin in self.TRIAGE_PLUGINS:
             try:
-                events = self._run_plugin(file_path, vol_cmd, plugin)
+                logger.info(
+                    f"Running Volatility plugin '{plugin}' on {file_path.name} "
+                    f"({file_size_gb:.1f} GB)"
+                )
+                events, warnings = self._run_plugin(
+                    file_path, vol_cmd, plugin, symbols_path
+                )
                 for event in events:
                     line_num += 1
                     event.source_line = line_num
                     result.add_event(event)
+                for warning in warnings:
+                    result.add_warning(warning)
+
+                logger.info(f"Plugin '{plugin}' returned {len(events)} events")
+
             except Exception as e:
+                logger.error(f"Plugin {plugin} failed with exception: {e}", exc_info=True)
                 result.add_warning(f"Plugin {plugin} failed: {str(e)}")
 
         result.metadata["plugins_run"] = self.TRIAGE_PLUGINS
+        result.metadata["symbols_path"] = str(symbols_path) if symbols_path else None
         return result
 
     def _run_plugin(
-        self, file_path: Path, vol_cmd: str, plugin: str
-    ) -> list[UnifiedEvent]:
-        """Run a Volatility plugin and parse output."""
+        self,
+        file_path: Path,
+        vol_cmd: str,
+        plugin: str,
+        symbols_path: Optional[Path] = None,
+        timeout: int = 600,  # 10 minutes per plugin (increased from 300)
+    ) -> tuple[list[UnifiedEvent], list[str]]:
+        """Run a Volatility plugin and parse output.
+
+        Returns:
+            Tuple of (events list, warnings list)
+        """
         events = []
+        warnings = []
+
+        # Check for timeout override from environment
+        timeout = int(os.environ.get("ARGUS_VOL_TIMEOUT", timeout))
 
         try:
-            cmd = [
-                vol_cmd,
+            # Build command
+            cmd = [vol_cmd]
+
+            # Add symbols path if available
+            if symbols_path:
+                cmd.extend(["-s", str(symbols_path)])
+
+            cmd.extend([
                 "-f", str(file_path),
                 "-r", "json",
                 plugin,
-            ]
+            ])
+
+            logger.debug(f"Running command: {' '.join(cmd)}")
 
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout per plugin
+                timeout=timeout,
             )
 
+            # Handle non-zero return code
             if proc.returncode != 0:
-                return events
+                logger.warning(
+                    f"Volatility plugin '{plugin}' exited with code {proc.returncode}. "
+                    f"Stdout (first 500): {proc.stdout[:500] if proc.stdout else 'empty'}. "
+                    f"Stderr (first 500): {proc.stderr[:500] if proc.stderr else 'empty'}"
+                )
+                # Don't return yet - check if there's still usable output
+                if not proc.stdout or not proc.stdout.strip():
+                    warnings.append(
+                        f"Plugin {plugin} failed (exit code {proc.returncode}): "
+                        f"{proc.stderr[:200] if proc.stderr else 'no error message'}"
+                    )
+                    return events, warnings
 
             # Parse JSON output
             try:
                 data = json.loads(proc.stdout)
             except json.JSONDecodeError:
-                # Try line-by-line JSON
+                # Try line-by-line JSON (some plugins output JSONL)
                 for line in proc.stdout.strip().split("\n"):
                     if line.strip():
                         try:
@@ -136,7 +251,7 @@ class MemoryParser(BaseParser):
                                 events.append(event)
                         except json.JSONDecodeError:
                             continue
-                return events
+                return events, warnings
 
             # Handle array output
             if isinstance(data, list):
@@ -145,12 +260,26 @@ class MemoryParser(BaseParser):
                     if event:
                         events.append(event)
 
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                f"Volatility plugin '{plugin}' timed out after {timeout}s "
+                f"on file {file_path.name}"
+            )
+            warnings.append(f"Plugin {plugin} timed out after {timeout}s")
+        except subprocess.SubprocessError as e:
+            logger.error(f"Volatility subprocess error for plugin '{plugin}': {e}")
+            warnings.append(f"Plugin {plugin} subprocess error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Volatility JSON output for plugin '{plugin}': {e}")
+            warnings.append(f"Plugin {plugin} JSON parse error: {e}")
+        except Exception as e:
+            logger.error(
+                f"Unexpected error running Volatility plugin '{plugin}': {e}",
+                exc_info=True
+            )
+            warnings.append(f"Plugin {plugin} unexpected error: {type(e).__name__}: {e}")
 
-        return events
+        return events, warnings
 
     def _parse_record(
         self, record: dict, plugin: str, source_file: str
@@ -159,8 +288,17 @@ class MemoryParser(BaseParser):
         if not isinstance(record, dict):
             return None
 
-        # Extract common fields
-        timestamp = datetime.now(timezone.utc)  # Vol3 doesn't always provide timestamps
+        # Extract timestamp from record if available
+        timestamp = datetime.now(timezone.utc)
+        if "CreateTime" in record and record["CreateTime"]:
+            try:
+                # Vol3 returns ISO format timestamps
+                ts_str = record["CreateTime"]
+                if isinstance(ts_str, str):
+                    # Handle various timestamp formats
+                    timestamp = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
 
         # Determine event type and extract fields based on plugin
         event_type = f"Memory_{plugin.split('.')[-1]}"

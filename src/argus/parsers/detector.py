@@ -27,6 +27,7 @@ from argus.parsers.cloud.gcp import GCPAuditParser
 from argus.parsers.registry import RegistryParser
 from argus.parsers.prefetch import PrefetchParser
 from argus.parsers.memory import MemoryParser
+from argus.parsers.pe import PEParser
 from argus.parsers.syslog import SyslogParser
 from argus.parsers.jsonl import JSONLinesParser
 from argus.parsers.suricata import SuricataParser
@@ -53,6 +54,7 @@ PARSERS: list[Type[BaseParser]] = [
     RegistryParser,
     PrefetchParser,
     MemoryParser,
+    PEParser,  # PE/EXE malware analysis
     BrowserHistoryParser,  # SQLite browser databases
 
     # Excel (specific extension and format)

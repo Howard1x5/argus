@@ -38,6 +38,7 @@ from argus.parsers.pcap import PCAPParser
 from argus.parsers.registry import RegistryParser
 from argus.parsers.prefetch import PrefetchParser
 from argus.parsers.memory import MemoryParser
+from argus.parsers.pe import PEParser
 from argus.parsers.syslog import SyslogParser
 from argus.parsers.jsonl import JSONLinesParser
 from argus.parsers.suricata import SuricataParser
@@ -92,6 +93,7 @@ __all__ = [
     "RegistryParser",
     "PrefetchParser",
     "MemoryParser",
+    "PEParser",
     "SyslogParser",
     "JSONLinesParser",
     "SuricataParser",
