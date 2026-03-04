@@ -56,6 +56,31 @@ def load_triage_findings(case_path: Path) -> list[dict]:
     return []
 
 
+def load_extraction_results(case_path: Path) -> dict:
+    """Load ALL extraction results produced by ForensicExtractor.
+
+    These contain 100% of the evidence, pre-analyzed programmatically.
+    Agents should interpret this data, not re-discover it from raw events.
+    """
+    extractions_dir = case_path / "extractions"
+    if not extractions_dir.exists():
+        return {}
+
+    context = {}
+
+    # Load every JSON file in the extractions directory
+    for json_file in sorted(extractions_dir.glob("*.json")):
+        try:
+            with open(json_file) as f:
+                data = json.load(f)
+            key = json_file.stem  # filename without .json
+            context[key] = data
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return context
+
+
 def run_analysis(case_path_str: str) -> bool:
     """Run Phase 3: Deep Analysis.
 
@@ -120,6 +145,11 @@ def run_analysis(case_path_str: str) -> bool:
         click.echo("  ForensicExtractor not yet implemented, skipping Phase 3a")
         extractions = {}
 
+    # Load extraction results from disk (in case ForensicExtractor saved them)
+    extraction_results = load_extraction_results(case_path)
+    if extraction_results:
+        click.echo(f"  Loaded {len(extraction_results)} extraction categories for agents")
+
     # Phase 3b: Run analysis agents with extraction results
     click.echo("\nPhase 3b: Deep Analysis (LLM Agents)")
     click.echo("-" * 30)
@@ -132,6 +162,7 @@ def run_analysis(case_path_str: str) -> bool:
             hypotheses=hypotheses,
             triage_findings=triage_findings,
             output_dir=analysis_dir,
+            extraction_results=extraction_results,  # NEW: Pass extraction data to agents
         )
 
         # Count total claims

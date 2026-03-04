@@ -75,6 +75,65 @@ class BaseAgent(ABC):
         """Build the user prompt from context data."""
         pass
     
+    # Define which extraction keys each agent type cares about
+    # Override in subclass to customize
+    relevant_extraction_keys: list[str] = ["extraction_summary"]
+
+    def format_extraction_context(self, context: dict, max_chars: int = 8000) -> str:
+        """Format extraction results for inclusion in agent prompt.
+
+        Agents receive pre-analyzed data from ForensicExtractor (100% coverage).
+        This method formats relevant extractions for the prompt.
+        """
+        extraction_results = context.get("extraction_results", {})
+        if not extraction_results:
+            return ""
+
+        parts = []
+        parts.append("## PRE-EXTRACTED FINDINGS (100% evidence coverage)")
+        parts.append("The following data was extracted programmatically from ALL evidence.")
+        parts.append("This is comprehensive — you are seeing everything, not a sample.")
+        parts.append("")
+
+        # Always include extraction summary if available
+        summary = extraction_results.get("extraction_summary", {})
+        if summary:
+            parts.append("### Extraction Summary")
+            summary_str = json.dumps(summary, indent=2, default=str)
+            if len(summary_str) > 3000:
+                summary_str = summary_str[:3000] + "\n... [truncated]"
+            parts.append(summary_str)
+            parts.append("")
+
+        # Include extractions relevant to this agent
+        keys_to_include = self.relevant_extraction_keys
+        if "ALL" in keys_to_include:
+            keys_to_include = list(extraction_results.keys())
+
+        total_chars = len("\n".join(parts))
+        for key in keys_to_include:
+            if key == "extraction_summary":
+                continue  # Already included above
+            if key in extraction_results:
+                data = extraction_results[key]
+                data_str = json.dumps(data, indent=2, default=str)
+
+                # Check if adding this would exceed limit
+                if total_chars + len(data_str) > max_chars:
+                    # Truncate this extraction
+                    remaining = max_chars - total_chars - 100
+                    if remaining > 500:
+                        data_str = data_str[:remaining] + "\n... [truncated]"
+                    else:
+                        continue  # Skip if not enough room
+
+                parts.append(f"### {key}")
+                parts.append(data_str)
+                parts.append("")
+                total_chars += len(data_str) + len(key) + 10
+
+        return "\n".join(parts)
+
     def chunk_events(self, events: list[dict], max_chars: int = 50000) -> list[list[dict]]:
         """Split events into chunks that fit token limits."""
         chunks = []

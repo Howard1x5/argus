@@ -61,15 +61,41 @@ OUTPUT FORMAT - Return claims as JSON:
 }
 ```
 
-Be precise. Reference actual data. Don't fabricate evidence."""
+Be precise. Reference actual data. Don't fabricate evidence.
+
+MEMORY FORENSICS EVENTS:
+When evidence includes memory dumps, you'll see Volatility-derived events with event_type prefixes:
+- Memory_pslist / Memory_pstree: Process listing with PID, PPID, name, start time
+- Memory_cmdline: Full command line arguments for each process
+- Memory_netscan / Memory_netstat: Network connections with local/remote IP:port and owning PID
+- Memory_getsids: Security identifiers - SHOWS WHICH USER ACCOUNT OWNS EACH PROCESS
+- Memory_malfind: Injected/suspicious code regions in process memory
+- Memory_dlllist: Loaded DLLs per process
+- Memory_handles: Open handles (files, registry keys, mutexes)
+- Memory_svcscan: Windows services from memory
+- Memory_envars: Environment variables per process
+- Memory_filescan: Files cached in memory
+
+KEY MEMORY FORENSICS ANALYSIS PATTERNS:
+1. User Attribution: Memory_getsids maps PIDs to usernames — use this to identify compromised accounts
+2. Process Injection: Memory_malfind flags indicate injected code — correlate the target PID with pslist
+3. Hidden Processes: Compare Memory_pslist vs Memory_pstree for process hiding
+4. C2 Connections: Memory_netscan shows connections that may not appear in logs
+5. Full Command Lines: Memory_cmdline often has complete commands truncated in event logs
+
+When you see event_type starting with "Memory_", apply memory forensics analysis techniques."""
 
 
 class ProcessTreeAgent(BaseAgent):
     """Agent 1: Process Tree Forensics."""
-    
+
     name = "agent_01_process_trees"
     description = "Analyzes process creation and parent-child relationships"
-    
+    relevant_extraction_keys = [
+        "extraction_summary", "process_trees", "credential_access", "lolbin_detection",
+        "unified_timeline"
+    ]
+
     def get_system_prompt(self) -> str:
         return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "1") + """
 
@@ -116,6 +142,9 @@ PROCESS TREE TIMELINE:
         hypotheses = context.get("hypotheses", [])
         routed = context.get("routed_events", {})
 
+        # Include extraction results at the TOP (pre-analyzed 100% coverage data)
+        extraction_section = self.format_extraction_context(context)
+
         # Use routed events if available (prioritized by suspiciousness)
         if routed.get("process"):
             process_events = routed["process"]
@@ -123,14 +152,16 @@ PROCESS TREE TIMELINE:
         else:
             events = context.get("events", [])
             process_events = [e for e in events if
-                any(x in str(e.get("event_type", "")).lower() for x in ["4688", "process", "sysmon_1", "sysmon 1"])]
+                any(x in str(e.get("event_type", "")).lower() for x in ["4688", "process", "sysmon_1", "sysmon 1", "memory_pslist", "memory_cmdline"])]
             source = "filtered"
 
         # Also include webshell-related process events (critical)
         webshell_data = routed.get("webshell", {})
         w3wp_children = webshell_data.get("w3wp_children", [])
 
-        return f"""## Hypotheses to Investigate
+        return f"""{extraction_section}
+
+## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
 ## CRITICAL: Webshell Process Chain (w3wp.exe children) - {len(w3wp_children)} events
@@ -261,10 +292,14 @@ Analyze registry modifications. Identify persistence mechanisms and suspicious r
 
 class NetworkAgent(BaseAgent):
     """Agent 4: Network Forensics."""
-    
+
     name = "agent_04_network"
     description = "Analyzes network connections and DNS queries"
-    
+    relevant_extraction_keys = [
+        "extraction_summary", "network", "lateral_movement", "dns_tunneling",
+        "network_statistics", "dga_detection"
+    ]
+
     def get_system_prompt(self) -> str:
         return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "4") + """
 
@@ -295,7 +330,7 @@ ATTACKER PIVOT DETECTION (from IIS/Web logs):
   * Windows UA → Linux UA = attacker switched to attack VM (likely Kali)
   * "Mozilla/5.0 (X11; Linux x86_64)" = common Kali/attack machine fingerprint
 - VirtualBox network: 192.168.56.x is default host-only network
-  * 192.168.56.1 = typically VirtualBox HOST machine
+  * 192.168.56[.]1 = typically VirtualBox HOST machine
   * If Linux UA from .1 accessing Windows server = attacker VM
 
 TIMELINE GAP ANALYSIS:
@@ -306,6 +341,9 @@ TIMELINE GAP ANALYSIS:
     def build_user_prompt(self, context: dict) -> str:
         hypotheses = context.get("hypotheses", [])
         routed = context.get("routed_events", {})
+
+        # Include extraction results at the TOP (pre-analyzed 100% coverage data)
+        extraction_section = self.format_extraction_context(context)
 
         # Use routed events if available
         if routed.get("network"):
@@ -321,7 +359,9 @@ TIMELINE GAP ANALYSIS:
         # Include lateral movement events
         lateral_events = routed.get("lateral_movement", [])
 
-        return f"""## Hypotheses to Investigate
+        return f"""{extraction_section}
+
+## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
 ## CRITICAL: Lateral Movement Events - {len(lateral_events)} events
@@ -382,10 +422,14 @@ Analyze service installations. Identify malicious services and persistence mecha
 
 class AuthenticationAgent(BaseAgent):
     """Agent 6: Authentication Forensics."""
-    
+
     name = "agent_06_auth"
     description = "Analyzes authentication events and credential usage"
-    
+    relevant_extraction_keys = [
+        "extraction_summary", "auth_timeline", "kerberoasting", "credential_access",
+        "lateral_movement", "account_management"
+    ]
+
     def get_system_prompt(self) -> str:
         return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "6") + """
 
@@ -433,6 +477,9 @@ ATTACK PHASE MARKERS IN AUTH LOGS:
         hypotheses = context.get("hypotheses", [])
         routed = context.get("routed_events", {})
 
+        # Include extraction results at the TOP (pre-analyzed 100% coverage data)
+        extraction_section = self.format_extraction_context(context)
+
         # Use routed events if available
         if routed.get("auth"):
             auth_events = routed["auth"]
@@ -447,7 +494,9 @@ ATTACK PHASE MARKERS IN AUTH LOGS:
         # Include lateral movement events (contains auth for lateral movement)
         lateral_events = routed.get("lateral_movement", [])
 
-        return f"""## Hypotheses to Investigate
+        return f"""{extraction_section}
+
+## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
 ## CRITICAL: Lateral Movement Auth Events - {len(lateral_events)} events
@@ -520,7 +569,7 @@ TIMELINE GAP ANALYSIS:
 
 MULTI-SYSTEM ATTACK FLOW:
 Track commands that reference OTHER systems:
-- `-Target 192.168.56.10` = attacking DC from web server
+- `-Target 192.168.56[.]10` = attacking DC from web server
 - Commands mentioning hostnames (DCSRV, WEB01)
 - Correlate with destination system's logs for matching activity"""
     
@@ -739,7 +788,7 @@ USER-AGENT FINGERPRINTING:
 
 VIRTUALBOX/VM PIVOT INDICATORS:
 - 192.168.56.x network = VirtualBox host-only (common lab/attack setup)
-- 192.168.56.1 = typically the VirtualBox HOST machine
+- 192.168.56[.]1 = typically the VirtualBox HOST machine
 - If internal IP appears with Linux UA on Windows network = VM pivot
 
 COMMAND CATEGORIZATION:
@@ -829,6 +878,7 @@ class AnomalyHunterAgent(BaseAgent):
 
     name = "agent_10_anomalies"
     description = "Finds anything other agents might miss"
+    relevant_extraction_keys = ["ALL"]  # Gets all extraction data to find anomalies
 
     def get_system_prompt(self) -> str:
         return ANALYSIS_SYSTEM_PROMPT.replace("{agent_num}", "10") + """
@@ -847,7 +897,7 @@ Find anything other agents might miss:
 
 ATTACK INFRASTRUCTURE DETECTION:
 - 192.168.56.x network = VirtualBox host-only (common lab/attack setup)
-  * 192.168.56.1 = typically the VirtualBox HOST machine
+  * 192.168.56[.]1 = typically the VirtualBox HOST machine
   * If this IP appears with Linux User-Agent = attacker's attack VM
 - Different User-Agent strings from same logical "attacker" (Windows → Linux)
 - Internal IPs appearing as sources mid-attack (pivot indicators)
@@ -887,8 +937,13 @@ TIMELINE ANOMALY DETECTION:
         events = context.get("events", [])
         hypotheses = context.get("hypotheses", [])
         triage_findings = context.get("triage_findings", [])
-        
-        return f"""## Hypotheses to Investigate
+
+        # Include ALL extraction results (this agent hunts for anomalies)
+        extraction_section = self.format_extraction_context(context, max_chars=12000)
+
+        return f"""{extraction_section}
+
+## Hypotheses to Investigate
 {json.dumps(hypotheses[:5], indent=2, default=str)}
 
 ## Triage Findings Already Identified
@@ -897,7 +952,8 @@ TIMELINE ANOMALY DETECTION:
 ## All Events (sample - look for anomalies)
 {json.dumps(events[:150], indent=2, default=str)}
 
-Hunt for anomalies. Find what other agents missed. Look for rare events and suspicious patterns."""
+Hunt for anomalies. Find what other agents missed. Look for rare events and suspicious patterns.
+Pay special attention to user accounts, PIDs, and process relationships in the extraction data."""
 
 
 class SynthesizerAgent(BaseAgent):
@@ -906,7 +962,8 @@ class SynthesizerAgent(BaseAgent):
     name = "agent_11_synthesizer"
     description = "Synthesizes all agent findings into unified analysis"
     max_tokens = 8192
-    
+    relevant_extraction_keys = ["ALL"]  # Synthesizer sees everything
+
     def get_system_prompt(self) -> str:
         return """You are the Master Synthesizer for an incident response analysis.
 You receive findings from 9 specialized forensic agents. Your task is to:
@@ -944,8 +1001,13 @@ OUTPUT FORMAT:
     def build_user_prompt(self, context: dict) -> str:
         agent_results = context.get("agent_results", {})
         hypotheses = context.get("hypotheses", [])
-        
-        prompt = f"""## Initial Hypotheses
+
+        # Include extraction summary for comprehensive synthesis
+        extraction_section = self.format_extraction_context(context, max_chars=6000)
+
+        prompt = f"""{extraction_section}
+
+## Initial Hypotheses
 {json.dumps(hypotheses, indent=2, default=str)}
 
 ## Agent Findings:
@@ -957,11 +1019,12 @@ OUTPUT FORMAT:
             prompt += f"### {agent_name}\nClaims: {len(claims)}, Findings: {len(findings)}\n"
             prompt += json.dumps(claims[:10] + findings[:10], indent=2, default=str)[:3000]
             prompt += "\n\n"
-        
+
         prompt += """
 Synthesize all findings into a unified attack reconstruction.
-Build the timeline. Map to MITRE. Identify gaps and contradictions."""
-        
+Build the timeline. Map to MITRE. Identify gaps and contradictions.
+IMPORTANT: Include user accounts and compromised users from the extraction data in your IOC list."""
+
         return prompt
 
 
@@ -988,6 +1051,7 @@ def run_analysis_agents(
     triage_findings: list[dict],
     output_dir: Path,
     routed_events: Optional[dict] = None,
+    extraction_results: Optional[dict] = None,
 ) -> dict:
     """Run all analysis agents and synthesizer.
 
@@ -997,6 +1061,7 @@ def run_analysis_agents(
         triage_findings: Findings from triage
         output_dir: Directory for output files
         routed_events: Pre-categorized and prioritized events from EventRouter
+        extraction_results: Complete extraction results from ForensicExtractor (100% coverage)
 
     Returns:
         Dict with all agent results and synthesis
@@ -1011,6 +1076,7 @@ def run_analysis_agents(
         "hypotheses": hypotheses,
         "triage_findings": triage_findings,
         "routed_events": routed_events or {},
+        "extraction_results": extraction_results or {},  # NEW: Pre-analyzed data from ForensicExtractor
     }
     
     # Run domain agents
@@ -1046,6 +1112,7 @@ def run_analysis_agents(
         synth_context = {
             "agent_results": results,
             "hypotheses": hypotheses,
+            "extraction_results": extraction_results or {},  # Pass extractions to synthesizer
         }
         synth_result = synth.run(synth_context)
         results["synthesis"] = synth_result.to_dict()

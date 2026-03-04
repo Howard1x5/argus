@@ -167,9 +167,76 @@ def load_sigma_rules(case_path: Path) -> list[str]:
     return rules
 
 
-def generate_executive_summary(synthesis: dict, claims: list, iocs: dict) -> str:
+def load_extraction_highlights(case_path: Path) -> dict:
+    """Load key findings from extractions for report inclusion.
+
+    The ForensicExtractor produces comprehensive analysis of 100% of the evidence.
+    This function extracts the most important findings for the report.
+    """
+    extractions_dir = case_path / "extractions"
+    highlights = {}
+
+    if not extractions_dir.exists():
+        return highlights
+
+    # Load extraction summary
+    summary_file = extractions_dir / "extraction_summary.json"
+    if summary_file.exists():
+        try:
+            with open(summary_file) as f:
+                highlights["extraction_summary"] = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load network findings
+    network_file = extractions_dir / "network.json"
+    if network_file.exists():
+        try:
+            with open(network_file) as f:
+                data = json.load(f)
+                highlights["external_connections"] = data.get("external_connections_count", 0)
+                highlights["c2_candidates"] = data.get("c2_candidates", [])
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load credential access findings
+    cred_file = extractions_dir / "credential_access.json"
+    if cred_file.exists():
+        try:
+            with open(cred_file) as f:
+                data = json.load(f)
+                highlights["credential_tools_count"] = data.get("credential_tools_count", 0)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load process trees
+    process_file = extractions_dir / "process_trees.json"
+    if process_file.exists():
+        try:
+            with open(process_file) as f:
+                data = json.load(f)
+                highlights["w3wp_children_count"] = data.get("w3wp_children_count", 0)
+                highlights["credential_processes_count"] = data.get("credential_processes_count", 0)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Load auth timeline for user accounts
+    auth_file = extractions_dir / "auth_timeline.json"
+    if auth_file.exists():
+        try:
+            with open(auth_file) as f:
+                data = json.load(f)
+                highlights["unique_users"] = data.get("unique_users", [])
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    return highlights
+
+
+def generate_executive_summary(synthesis: dict, claims: list, iocs: dict, extraction_highlights: dict = None) -> str:
     """Generate executive summary from analysis data."""
     summary_parts = []
+    extraction_highlights = extraction_highlights or {}
 
     # Get narrative if available
     narrative = synthesis.get("executive_narrative", "")
@@ -188,6 +255,28 @@ def generate_executive_summary(synthesis: dict, claims: list, iocs: dict) -> str
 
     if high_risk_iocs > 0:
         summary_parts.append(f"\n\n**Critical IOCs:** {high_risk_iocs} high-risk indicators of compromise were extracted and should be blocked immediately.")
+
+    # Add extraction highlights
+    ext_summary = extraction_highlights.get("extraction_summary", {})
+    if ext_summary:
+        category_summaries = ext_summary.get("category_summaries", {})
+
+        # Network findings
+        network_info = category_summaries.get("network", {})
+        external_conn = network_info.get("external_connections_count", 0)
+        if external_conn > 0:
+            summary_parts.append(f"\n\n**Network Activity:** {external_conn} external connections detected.")
+
+        # Credential findings
+        cred_info = category_summaries.get("credential_access", {})
+        cred_tools = cred_info.get("credential_tools_count", 0)
+        if cred_tools > 0:
+            summary_parts.append(f"\n\n**Credential Access:** {cred_tools} credential tool executions detected.")
+
+        # User accounts (from extraction)
+        unique_users = extraction_highlights.get("unique_users", [])
+        if unique_users:
+            summary_parts.append(f"\n\n**User Accounts:** {len(unique_users)} unique user accounts identified in evidence.")
 
     return "".join(summary_parts)
 
@@ -442,13 +531,14 @@ def generate_markdown_report(case_path: Path) -> str:
     iocs = load_iocs(case_path)
     mitre_mapping = load_mitre_mapping(case_path)
     sigma_rules = load_sigma_rules(case_path)
+    extraction_highlights = load_extraction_highlights(case_path)  # NEW: Load extraction data
 
     # Generate sections
     report = REPORT_TEMPLATE.format(
         case_id=metadata.get("case_id", case_path.name),
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         classification=metadata.get("classification", "INTERNAL"),
-        executive_summary=generate_executive_summary(synthesis, claims, iocs),
+        executive_summary=generate_executive_summary(synthesis, claims, iocs, extraction_highlights),
         timeline_section=generate_timeline_section(claims),
         attack_chain_section=generate_attack_chain_section(synthesis, mitre_mapping),
         mitre_section=generate_mitre_section(mitre_mapping),
