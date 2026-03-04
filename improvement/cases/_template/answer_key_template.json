@@ -1,0 +1,21 @@
+{
+  "case_name": "TEMPLATE",
+  "source": "CyberDefenders",
+  "difficulty": "easy|medium|hard",
+  "evidence_files": [
+    {"path": "evidence/filename.ext", "type": "evtx|memory|pcap|xlsx|iis|pe"}
+  ],
+  "expected_findings": [
+    {
+      "id": "F01",
+      "category": "process|network|malware|user|injection|persistence|exfiltration|lateral_movement|credential_access|mitre",
+      "description": "Human-readable description of expected finding",
+      "search_terms": ["term1", "term2"],
+      "search_mode": "ALL|ANY",
+      "required": true,
+      "points": 10
+    }
+  ],
+  "total_possible_points": 0,
+  "_notes": "search_mode: ALL means every term must match, ANY means at least one must match"
+}
