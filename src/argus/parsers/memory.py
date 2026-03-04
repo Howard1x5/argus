@@ -80,6 +80,7 @@ class MemoryParser(BaseParser):
     }
 
     # Volatility plugins to run for triage
+    # Tier 1: Critical for IR (run always)
     TRIAGE_PLUGINS = [
         "windows.info",       # System metadata, kernel base address (fast, run first)
         "windows.pslist",     # Process list
@@ -88,6 +89,36 @@ class MemoryParser(BaseParser):
         "windows.netscan",    # Network connections
         "windows.malfind",    # Injected code detection
         "windows.filescan",   # Find files in memory
+        # Tier 1 additions (S2.7.1) - HIGH priority
+        "windows.dlllist",    # DLL injection detection
+        "windows.handles",    # Open file/registry handles
+        "windows.svcscan",    # Service enumeration
+        "windows.netstat",    # Active connections (alternative to netscan)
+        "windows.registry.hivelist",  # Available registry hives
+        "windows.getsids",    # SID information for processes
+        # Tier 2 additions (S2.7.2) - MEDIUM priority
+        "windows.envars",     # Environment variables
+        "windows.registry.userassist",  # UserAssist registry data
+        # Tier 3 additions (S2.7.3) - LOWER priority (useful for deeper analysis)
+        "windows.callbacks",  # Kernel callbacks (rootkit detection)
+        "windows.ssdt",       # SSDT hooks (rootkit detection)
+    ]
+
+    # Additional plugins that can be run on demand (slower or less common)
+    EXTENDED_PLUGINS = [
+        "windows.hollowprocesses",  # Process hollowing detection
+        "windows.suspicious_threads",  # Suspicious thread detection
+        "windows.psxview",    # Hidden process detection
+        "windows.scheduled_tasks",  # Scheduled tasks
+        "windows.lsadump",    # LSA secrets
+        "windows.cachedump",  # Cached credentials
+        "windows.cmdscan",    # Command history (cmd.exe)
+        "windows.consoles",   # Console history
+        "windows.shimcachemem",  # Shimcache from memory
+        "windows.amcache",    # Amcache from memory
+        "windows.dumpfiles",  # Dump files from memory
+        "windows.hashdump",   # Password hashes (requires elevated)
+        "windows.threads",    # Thread information
     ]
 
     @classmethod
@@ -362,6 +393,136 @@ class MemoryParser(BaseParser):
                 "offset": record.get("Offset"),
                 "name": record.get("Name"),
                 "size": record.get("Size"),
+            })
+
+        elif "dlllist" in plugin:
+            # windows.dlllist - loaded DLLs per process
+            event.process_name = record.get("ImageFileName")
+            event.process_id = record.get("PID")
+            dll_path = record.get("Path") or record.get("FullDllName")
+            event.command_line = dll_path  # Store DLL path in command_line
+            event.raw_payload = json.dumps({
+                "pid": record.get("PID"),
+                "process": record.get("ImageFileName"),
+                "dll_base": record.get("Base"),
+                "dll_path": dll_path,
+                "dll_size": record.get("Size"),
+            })
+
+        elif "handles" in plugin:
+            # windows.handles - open handles
+            event.process_name = record.get("ImageFileName")
+            event.process_id = record.get("PID")
+            handle_type = record.get("Type")
+            handle_name = record.get("Name") or record.get("HandleValue")
+            event.raw_payload = json.dumps({
+                "pid": record.get("PID"),
+                "process": record.get("ImageFileName"),
+                "handle_type": handle_type,
+                "handle_name": handle_name,
+                "granted_access": record.get("GrantedAccess"),
+            })
+
+        elif "svcscan" in plugin:
+            # windows.svcscan - Windows services
+            service_name = record.get("Name") or record.get("ServiceName")
+            event.process_name = service_name
+            event.command_line = record.get("Binary") or record.get("ImagePath")
+            event.raw_payload = json.dumps({
+                "service_name": service_name,
+                "display_name": record.get("DisplayName"),
+                "service_type": record.get("Type"),
+                "start_type": record.get("Start"),
+                "state": record.get("State"),
+                "binary_path": record.get("Binary") or record.get("ImagePath"),
+            })
+            # Flag suspicious service states
+            state = str(record.get("State", "")).lower()
+            if "running" not in state and service_name:
+                event.severity = EventSeverity.LOW
+
+        elif "netstat" in plugin:
+            # windows.netstat - alternative network connections
+            event.source_ip = record.get("LocalAddr")
+            event.source_port = record.get("LocalPort")
+            event.dest_ip = record.get("ForeignAddr")
+            event.dest_port = record.get("ForeignPort")
+            event.process_id = record.get("PID")
+            event.process_name = record.get("Owner")
+            event.raw_payload = json.dumps({
+                "state": record.get("State"),
+                "protocol": record.get("Proto"),
+            })
+
+        elif "hivelist" in plugin:
+            # windows.registry.hivelist - registry hives
+            hive_path = record.get("FileFullPath") or record.get("Name")
+            event.process_name = hive_path
+            event.raw_payload = json.dumps({
+                "hive_offset": record.get("Offset"),
+                "file_path": hive_path,
+            })
+
+        elif "getsids" in plugin:
+            # windows.getsids - SID information
+            event.process_name = record.get("ImageFileName")
+            event.process_id = record.get("PID")
+            event.username = record.get("SID") or record.get("Name")
+            event.raw_payload = json.dumps({
+                "pid": record.get("PID"),
+                "process": record.get("ImageFileName"),
+                "sid": record.get("SID"),
+                "name": record.get("Name"),
+            })
+
+        elif "envars" in plugin:
+            # windows.envars - environment variables
+            event.process_name = record.get("ImageFileName")
+            event.process_id = record.get("PID")
+            var_name = record.get("Variable")
+            var_value = record.get("Value")
+            event.command_line = f"{var_name}={var_value}"
+            event.raw_payload = json.dumps({
+                "pid": record.get("PID"),
+                "process": record.get("ImageFileName"),
+                "variable": var_name,
+                "value": var_value,
+            })
+
+        elif "userassist" in plugin:
+            # windows.registry.userassist - UserAssist data
+            program = record.get("Path") or record.get("Name")
+            event.process_name = program
+            event.raw_payload = json.dumps({
+                "path": program,
+                "count": record.get("Count"),
+                "focus_count": record.get("FocusCount"),
+                "time_focused": record.get("TimeFocused"),
+                "last_updated": record.get("LastUpdated"),
+            })
+
+        elif "callbacks" in plugin:
+            # windows.callbacks - kernel callbacks
+            event.severity = EventSeverity.MEDIUM  # Callbacks can indicate rootkits
+            callback_type = record.get("Type")
+            module = record.get("Module") or record.get("Symbol")
+            event.process_name = module
+            event.raw_payload = json.dumps({
+                "callback_type": callback_type,
+                "callback_address": record.get("Callback"),
+                "module": module,
+                "detail": record.get("Detail"),
+            })
+
+        elif "ssdt" in plugin:
+            # windows.ssdt - SSDT hooks
+            event.severity = EventSeverity.MEDIUM  # SSDT hooks can indicate rootkits
+            event.process_name = record.get("Symbol") or record.get("Module")
+            event.raw_payload = json.dumps({
+                "index": record.get("Index"),
+                "address": record.get("Address"),
+                "module": record.get("Module"),
+                "symbol": record.get("Symbol"),
             })
 
         # Store raw record for all other plugins

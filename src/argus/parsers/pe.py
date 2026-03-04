@@ -173,6 +173,11 @@ class PEParser(BaseParser):
             "pe_machine_type": None,
             "pe_subsystem": None,
             "pe_imphash": None,
+            # Version info (S3.2.1)
+            "pe_version_info": None,
+            # Signature info (S3.2.2)
+            "pe_signature": None,
+            "pe_masquerading": False,
         }
 
         # Extract compile timestamp
@@ -221,6 +226,31 @@ class PEParser(BaseParser):
             pe_data["pe_imphash"] = pe.get_imphash()
         except Exception:
             pass
+
+        # Extract version info (S3.2.1)
+        version_info = self._extract_version_info(pe)
+        if version_info:
+            pe_data["pe_version_info"] = version_info
+
+            # Check for masquerading (known vendor but file is suspicious)
+            known_vendors = ["microsoft", "adobe", "google", "oracle", "intel", "nvidia", "amd"]
+            company = (version_info.get("CompanyName") or "").lower()
+            if any(vendor in company for vendor in known_vendors):
+                # Flag as potential masquerading if:
+                # - High entropy (packed)
+                # - Contains suspicious strings
+                # - OR we determine later it's unsigned
+                pe_data["pe_claimed_vendor"] = version_info.get("CompanyName")
+
+        # Extract digital signature info (S3.2.2)
+        signature_info = self._extract_signature_info(pe, file_path)
+        if signature_info:
+            pe_data["pe_signature"] = signature_info
+
+            # Check for masquerading: claims to be from known vendor but unsigned/invalid
+            if pe_data.get("pe_claimed_vendor"):
+                if not signature_info.get("signed") or not signature_info.get("valid"):
+                    pe_data["pe_masquerading"] = True
 
         # Extract sections with entropy
         section_names = []
@@ -290,6 +320,8 @@ class PEParser(BaseParser):
         severity = EventSeverity.INFO
         if pe_data["pe_is_packed"]:
             severity = EventSeverity.MEDIUM
+        if pe_data["pe_masquerading"]:
+            severity = EventSeverity.HIGH  # Masquerading is always high severity
         if pe_data["pe_suspicious_strings"]:
             # Check for high-risk indicators
             high_risk_patterns = ["cmd.exe", "powershell", "VirtualAlloc", "CreateRemoteThread"]
@@ -313,3 +345,98 @@ class PEParser(BaseParser):
         event.raw_payload = json.dumps(pe_data)
 
         return event
+
+    def _extract_version_info(self, pe: "pefile.PE") -> Optional[dict]:
+        """Extract PE version information (S3.2.1)."""
+        version_info = {}
+
+        try:
+            # Try to get VS_FIXEDFILEINFO
+            if hasattr(pe, 'VS_FIXEDFILEINFO'):
+                ffi = pe.VS_FIXEDFILEINFO[0]
+                version_info["FileVersionMS"] = ffi.FileVersionMS
+                version_info["FileVersionLS"] = ffi.FileVersionLS
+                version_info["ProductVersionMS"] = ffi.ProductVersionMS
+                version_info["ProductVersionLS"] = ffi.ProductVersionLS
+
+            # Try to get string table info
+            if hasattr(pe, 'FileInfo'):
+                for file_info in pe.FileInfo:
+                    if hasattr(file_info, 'Key'):
+                        # Handle list structure
+                        for info in file_info:
+                            if hasattr(info, 'StringTable'):
+                                for st_entry in info.StringTable:
+                                    for entry in st_entry.entries.items():
+                                        key = entry[0].decode('utf-8', errors='replace') if isinstance(entry[0], bytes) else entry[0]
+                                        value = entry[1].decode('utf-8', errors='replace') if isinstance(entry[1], bytes) else entry[1]
+                                        # Remove null characters
+                                        key = key.strip('\x00')
+                                        value = value.strip('\x00')
+                                        version_info[key] = value
+
+            # Fields we're specifically looking for
+            important_fields = [
+                "CompanyName", "ProductName", "FileDescription",
+                "OriginalFilename", "InternalName", "FileVersion",
+                "ProductVersion", "LegalCopyright",
+            ]
+
+            # Filter to only include important fields if we have them
+            if version_info:
+                filtered = {}
+                for field in important_fields:
+                    if field in version_info:
+                        filtered[field] = version_info[field]
+                    # Also check lowercase
+                    elif field.lower() in version_info:
+                        filtered[field] = version_info[field.lower()]
+                return filtered if filtered else version_info
+
+        except Exception as e:
+            logger.debug(f"Version info extraction failed: {e}")
+
+        return version_info if version_info else None
+
+    def _extract_signature_info(self, pe: "pefile.PE", file_path: Path) -> dict:
+        """Extract digital signature information (S3.2.2)."""
+        signature_info = {
+            "signed": False,
+            "valid": False,
+            "signer": None,
+        }
+
+        try:
+            # Check for Authenticode signature in security directory
+            security_dir = pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_SECURITY']
+            if hasattr(pe, 'OPTIONAL_HEADER') and pe.OPTIONAL_HEADER.DATA_DIRECTORY[security_dir].VirtualAddress != 0:
+                signature_info["signed"] = True
+
+                # Note: Full signature verification requires additional libraries
+                # like signify or wincertstore. For now, we just detect presence.
+                # In a production environment, you'd want to:
+                # 1. Extract the certificate
+                # 2. Verify the certificate chain
+                # 3. Check for certificate validity
+
+                # Try to extract signer info if possible
+                try:
+                    # This requires reading the raw signature data
+                    security_offset = pe.OPTIONAL_HEADER.DATA_DIRECTORY[security_dir].VirtualAddress
+                    security_size = pe.OPTIONAL_HEADER.DATA_DIRECTORY[security_dir].Size
+
+                    if security_size > 0:
+                        signature_info["signature_size"] = security_size
+                        # Mark as potentially valid (would need signify library for true verification)
+                        # For now, assume signed files with security directory are valid
+                        # unless we have reason to believe otherwise
+                        signature_info["valid"] = True
+                        signature_info["signer"] = "Unknown (signature present)"
+
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.debug(f"Signature extraction failed: {e}")
+
+        return signature_info

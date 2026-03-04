@@ -66,13 +66,36 @@ class PCAPParser(BaseParser):
                 "-e", "udp.srcport",
                 "-e", "udp.dstport",
                 "-e", "frame.protocols",
+                # HTTP request fields
                 "-e", "http.request.method",
                 "-e", "http.request.uri",
                 "-e", "http.host",
                 "-e", "http.user_agent",
+                # HTTP response fields (S2.1)
+                "-e", "http.response.code",
+                "-e", "http.content_type",
+                "-e", "http.content_length",
+                # DNS fields (S2.3)
                 "-e", "dns.qry.name",
+                "-e", "dns.qry.type",
+                "-e", "dns.flags.rcode",
+                "-e", "dns.resp.ttl",
                 "-e", "dns.a",
+                "-e", "dns.aaaa",
+                "-e", "dns.txt",
+                "-e", "dns.cname",
+                "-e", "dns.mx.mail_exchange",
+                # TLS fields (S2.5)
                 "-e", "tls.handshake.extensions_server_name",
+                "-e", "tls.handshake.ja3",
+                "-e", "tls.handshake.ja3s",
+                "-e", "tls.handshake.ja3_full",
+                # Kerberos fields (S2.4)
+                "-e", "kerberos.msg_type",
+                "-e", "kerberos.CNameString",
+                "-e", "kerberos.SNameString",
+                "-e", "kerberos.etype",
+                "-e", "kerberos.realm",
                 # SMB2 fields for file transfer and share enumeration
                 "-e", "smb2.tree",
                 "-e", "smb2.filename",
@@ -172,27 +195,100 @@ class PCAPParser(BaseParser):
             except (ValueError, TypeError):
                 pass
 
-        # HTTP fields
+        # HTTP request fields
         event.http_method = layers.get("http_request_method", [None])[0]
         event.uri = layers.get("http_request_uri", [None])[0]
         event.user_agent = layers.get("http_user_agent", [None])[0]
+
+        # HTTP response fields (S2.1)
+        http_response_code = layers.get("http_response_code", [None])[0]
+        http_content_type = layers.get("http_content_type", [None])[0]
+        http_content_length = layers.get("http_content_length", [None])[0]
 
         # HTTP host (for URL construction)
         http_host = layers.get("http_host", [None])[0]
         if http_host and event.uri:
             event.uri = f"http://{http_host}{event.uri}"
 
-        # DNS query
+        # Store HTTP response data in raw_payload as JSON if present
+        if http_response_code or http_content_type:
+            http_data = {
+                "response_code": http_response_code,
+                "content_type": http_content_type,
+                "content_length": http_content_length,
+            }
+            http_data = {k: v for k, v in http_data.items() if v is not None}
+            if http_data:
+                event.raw_payload = json.dumps(http_data)
+
+        # DNS extended fields (S2.3)
         dns_query = layers.get("dns_qry_name", [None])[0]
+        dns_query_type = layers.get("dns_qry_type", [None])[0]
+        dns_rcode = layers.get("dns_flags_rcode", [None])[0]
+        dns_ttl = layers.get("dns_resp_ttl", [None])[0]
+        dns_a = layers.get("dns_a", [None])[0]
+        dns_aaaa = layers.get("dns_aaaa", [None])[0]
+        dns_txt = layers.get("dns_txt", [None])[0]
+        dns_cname = layers.get("dns_cname", [None])[0]
+        dns_mx = layers.get("dns_mx_mail_exchange", [None])[0]
+
         if dns_query:
             event.uri = dns_query
             event.event_type = "PCAP_DNS"
+            dns_data = {
+                "query_name": dns_query,
+                "query_type": dns_query_type,
+                "rcode": dns_rcode,
+                "ttl": dns_ttl,
+                "a_record": dns_a,
+                "aaaa_record": dns_aaaa,
+                "txt_record": dns_txt,
+                "cname": dns_cname,
+                "mx_record": dns_mx,
+            }
+            dns_data = {k: v for k, v in dns_data.items() if v is not None}
+            if dns_data:
+                event.raw_payload = json.dumps(dns_data)
 
-        # TLS SNI
+        # TLS fields with JA3/JA3S (S2.5)
         tls_sni = layers.get("tls_handshake_extensions_server_name", [None])[0]
-        if tls_sni:
-            event.uri = tls_sni
+        ja3 = layers.get("tls_handshake_ja3", [None])[0]
+        ja3s = layers.get("tls_handshake_ja3s", [None])[0]
+        ja3_full = layers.get("tls_handshake_ja3_full", [None])[0]
+
+        if tls_sni or ja3 or ja3s:
             event.event_type = "PCAP_TLS"
+            if tls_sni:
+                event.uri = tls_sni
+            tls_data = {
+                "sni": tls_sni,
+                "ja3": ja3,
+                "ja3s": ja3s,
+                "ja3_full": ja3_full,
+            }
+            tls_data = {k: v for k, v in tls_data.items() if v is not None}
+            if tls_data:
+                event.raw_payload = json.dumps(tls_data)
+
+        # Kerberos fields (S2.4)
+        krb_msg_type = layers.get("kerberos_msg_type", [None])[0]
+        krb_cname = layers.get("kerberos_CNameString", [None])[0]
+        krb_sname = layers.get("kerberos_SNameString", [None])[0]
+        krb_etype = layers.get("kerberos_etype", [None])[0]
+        krb_realm = layers.get("kerberos_realm", [None])[0]
+
+        if krb_msg_type or krb_cname or krb_sname:
+            event.event_type = "PCAP_KERBEROS"
+            krb_data = {
+                "msg_type": krb_msg_type,
+                "cname": krb_cname,
+                "sname": krb_sname,
+                "etype": krb_etype,
+                "realm": krb_realm,
+            }
+            krb_data = {k: v for k, v in krb_data.items() if v is not None}
+            if krb_data:
+                event.raw_payload = json.dumps(krb_data)
 
         # SMB2 fields
         smb2_tree = layers.get("smb2_tree", [None])[0]

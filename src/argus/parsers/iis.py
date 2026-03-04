@@ -124,10 +124,16 @@ class IISParser(BaseParser):
         self, line: str, fields: list, line_num: int, source_file: str, system_name: str
     ) -> Optional[UnifiedEvent]:
         """Parse a single log line."""
-        values = line.split()
+        # Parse IIS log line handling quoted strings (User-Agent, etc.)
+        values = self._split_iis_line(line)
 
-        if len(values) != len(fields):
-            return None
+        # Handle field count mismatch
+        if len(values) < len(fields):
+            # Pad with empty values
+            values.extend(["-"] * (len(fields) - len(values)))
+        elif len(values) > len(fields):
+            # IIS logs sometimes have extra fields at the end, truncate
+            values = values[:len(fields)]
 
         data = dict(zip(fields, values))
 
@@ -240,3 +246,36 @@ class IISParser(BaseParser):
                 return True
 
         return False
+
+    def _split_iis_line(self, line: str) -> list:
+        """Split IIS log line handling quoted strings and empty fields.
+
+        IIS logs use double-quotes for fields containing spaces (like User-Agent).
+        Empty fields are represented as '-' or double spaces.
+        """
+        values = []
+        current = []
+        in_quotes = False
+        i = 0
+
+        # Handle empty query string (double space before port)
+        line = line.replace("  ", " - ")
+
+        while i < len(line):
+            char = line[i]
+
+            if char == '"':
+                in_quotes = not in_quotes
+            elif char == ' ' and not in_quotes:
+                if current:
+                    values.append(''.join(current))
+                    current = []
+            else:
+                current.append(char)
+            i += 1
+
+        # Don't forget the last value
+        if current:
+            values.append(''.join(current))
+
+        return values

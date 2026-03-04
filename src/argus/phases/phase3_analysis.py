@@ -128,7 +128,7 @@ def run_analysis(case_path_str: str) -> bool:
         from argus.agents.analysis_agents import run_analysis_agents
 
         results = run_analysis_agents(
-            extractions=extractions,
+            events=events,
             hypotheses=hypotheses,
             triage_findings=triage_findings,
             output_dir=analysis_dir,

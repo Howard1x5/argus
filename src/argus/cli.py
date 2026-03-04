@@ -927,6 +927,65 @@ def list_parsers(ctx: click.Context, custom_only: bool, builtin_only: bool) -> N
             click.echo(f"  {p['name']}: {p['description']}")
 
 
+@main.command("benchmark-init")
+@click.argument("case_id")
+@click.argument("case_name")
+@click.option("--source", default="CyberDefenders", help="Source platform for the challenge.")
+@click.option("--url", default="", help="URL to the challenge.")
+@click.option("--difficulty", type=click.Choice(["easy", "medium", "hard"]), default="medium")
+@click.pass_context
+def benchmark_init(ctx: click.Context, case_id: str, case_name: str, source: str, url: str, difficulty: str) -> None:
+    """Initialize a new benchmark case directory.
+
+    CASE_ID: Unique identifier (e.g., 001, 002)
+    CASE_NAME: Descriptive name (e.g., cybercorp_case1)
+    """
+    from argus.benchmark.cli import init_benchmark
+    ctx.invoke(init_benchmark, case_id=case_id, case_name=case_name, source=source, url=url, difficulty=difficulty)
+
+
+@main.command("benchmark-list")
+@click.option("--status", help="Filter by status (not_started, evidence_downloaded, etc.)")
+@click.pass_context
+def benchmark_list(ctx: click.Context, status: str) -> None:
+    """List all benchmark cases with their status."""
+    from argus.benchmark.cli import list_benchmarks
+    ctx.invoke(list_benchmarks, status=status)
+
+
+@main.command("benchmark-status")
+@click.argument("case_id")
+@click.pass_context
+def benchmark_status(ctx: click.Context, case_id: str) -> None:
+    """Show detailed status for a benchmark case.
+
+    CASE_ID: The benchmark case identifier.
+    """
+    from argus.benchmark.cli import show_status
+    ctx.invoke(show_status, case_id=case_id)
+
+
+@main.command("benchmark-path")
+@click.argument("case_id")
+@click.option("--evidence", is_flag=True, help="Show path to evidence directory.")
+@click.pass_context
+def benchmark_path(ctx: click.Context, case_id: str, evidence: bool) -> None:
+    """Show path to a benchmark case directory (useful for copying files).
+
+    CASE_ID: The benchmark case identifier.
+    """
+    from argus.benchmark.registry import BenchmarkRegistry
+    registry = BenchmarkRegistry()
+    case = registry.get(case_id)
+    if not case:
+        click.echo(click.style(f"Error: Benchmark case {case_id} not found.", fg="red"))
+        raise click.Abort()
+    if evidence:
+        click.echo(case.path / "evidence")
+    else:
+        click.echo(case.path)
+
+
 @main.command("delete-parser")
 @click.argument("parser_name")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
