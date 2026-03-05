@@ -450,13 +450,17 @@ class ScriptParser(BaseParser):
             result.add_event(event)
 
             # Re-extract IOCs from decoded content
+            # Include ALL IPs - private IPs can be internal C2, lateral movement targets
             for match in PATTERNS["ipv4"].finditer(decoded_content):
                 ip = match.group()
-                if ip not in seen_iocs and not self._is_private_ip(ip):
+                if ip not in seen_iocs:
                     seen_iocs.add(ip)
+                    is_private = self._is_private_ip(ip)
+                    severity = EventSeverity.HIGH if is_private else EventSeverity.CRITICAL
+                    description = f"Decoded content ({'internal' if is_private else 'external'})"
                     result.add_event(self._create_ioc_event(
                         file_path, file_mtime, 0, "Script_Decoded_IOC_IP",
-                        ip, "Decoded content", EventSeverity.CRITICAL, file_hash
+                        ip, description, severity, file_hash
                     ))
 
             for match in PATTERNS["url"].finditer(decoded_content):

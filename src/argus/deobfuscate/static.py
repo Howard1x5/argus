@@ -556,6 +556,143 @@ def decode_string_concat(content: str) -> DeobfuscationResult:
     )
 
 
+def decode_batch_var_index(content: str) -> DeobfuscationResult:
+    """Decode batch file variable indexing obfuscation.
+
+    This handles the pattern where a batch file:
+    1. Sets a variable with a scrambled alphabet
+    2. Uses %VAR:~N,1% to extract single characters
+    3. Chains variables to build commands
+
+    Args:
+        content: Batch file content
+
+    Returns:
+        DeobfuscationResult with decoded commands
+    """
+    # Extract ASCII content if there's encoding issues
+    ascii_content = ''.join(c for c in content if ord(c) < 128 or c in '\n\r\t')
+
+    # Find all SET commands: set "VAR=value" or set VAR=value
+    variables = {}
+    set_pattern = r'set\s+"?([^"=\s]+)=([^"\n\r]+)"?'
+
+    # First pass: find initial variable assignments
+    for match in re.finditer(set_pattern, ascii_content, re.IGNORECASE):
+        var_name = match.group(1).strip()
+        var_value = match.group(2).strip().rstrip('"')
+        if var_name and var_value:
+            variables[var_name] = var_value
+
+    def expand_var_refs(text: str, vars_dict: dict, depth: int = 0) -> str:
+        """Expand %VAR:~N,L% patterns recursively."""
+        if depth > 20:  # Prevent infinite recursion
+            return text
+
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '%':
+                # Find closing %
+                end = text.find('%', i + 1)
+                if end > i:
+                    ref = text[i + 1:end]
+                    # Check for :~N,L pattern
+                    colon_pos = ref.find(':~')
+                    if colon_pos >= 0:
+                        var_name = ref[:colon_pos]
+                        index_match = re.match(r'(\d+),(\d+)', ref[colon_pos + 2:])
+                        if index_match:
+                            start_idx = int(index_match.group(1))
+                            length = int(index_match.group(2))
+                            # Find variable (case-insensitive partial match)
+                            var_val = None
+                            for vn, vv in vars_dict.items():
+                                if var_name.lower() in vn.lower() or vn.lower() in var_name.lower():
+                                    var_val = vv
+                                    break
+                            if var_val and start_idx < len(var_val):
+                                result.append(var_val[start_idx:start_idx + length])
+                                i = end + 1
+                                continue
+                    # Simple variable reference
+                    elif ref in vars_dict:
+                        result.append(vars_dict[ref])
+                        i = end + 1
+                        continue
+            result.append(text[i])
+            i += 1
+
+        expanded = ''.join(result)
+
+        # Check for new SET commands and recurse
+        for match in re.finditer(set_pattern, expanded, re.IGNORECASE):
+            var_name = match.group(1).strip()
+            var_value = match.group(2).strip().rstrip('"')
+            if var_name and var_value:
+                vars_dict[var_name] = var_value
+
+        # Recurse if there are still unexpanded patterns
+        if '%' in expanded and ':~' in expanded:
+            return expand_var_refs(expanded, vars_dict, depth + 1)
+
+        return expanded
+
+    # Process line by line
+    decoded_lines = []
+    all_commands = []
+
+    for line in ascii_content.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        expanded = expand_var_refs(line, variables)
+        decoded_lines.append(expanded)
+
+        # Extract non-SET commands
+        if expanded.strip() and 'set' not in expanded.lower()[:10]:
+            # Clean up the command
+            cmd = expanded.strip()
+            if cmd and not cmd.startswith('@') and not cmd.startswith('::'):
+                all_commands.append(cmd)
+
+    decoded_content = '\n'.join(decoded_lines)
+
+    # Extract IOCs from decoded content
+    iocs = []
+    # IPs
+    for ip_match in re.finditer(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', decoded_content):
+        iocs.append(('ip', ip_match.group()))
+    # URLs
+    for url_match in re.finditer(r'https?://[^\s"\'<>]+', decoded_content):
+        iocs.append(('url', url_match.group()))
+    # Domains
+    for domain_match in re.finditer(r'(?:https?://)?([a-zA-Z0-9][a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}', decoded_content):
+        iocs.append(('domain', domain_match.group()))
+
+    # Convert to flat IOC list
+    iocs_flat = [ioc[1] for ioc in iocs]
+
+    if decoded_content != ascii_content or all_commands or iocs:
+        return DeobfuscationResult(
+            success=True,
+            obfuscation_type=ObfuscationType.BATCH_VAR_INDEX,
+            original=content,
+            decoded=decoded_content,
+            iocs_found=iocs_flat,
+            confidence=0.7 if iocs else 0.5,
+        )
+
+    return DeobfuscationResult(
+        success=False,
+        obfuscation_type=ObfuscationType.BATCH_VAR_INDEX,
+        original=content,
+        warnings=["Could not decode batch variable indexing"],
+        confidence=0.0,
+    )
+
+
 def detect_obfuscation_type(content: str) -> list[ObfuscationType]:
     """Detect what types of obfuscation are present in content.
 
@@ -647,14 +784,7 @@ def deobfuscate_static(content: str) -> DeobfuscationResult:
             results.append(decode_string_concat(content))
 
         elif obf_type == ObfuscationType.BATCH_VAR_INDEX:
-            # Batch variable indexing requires emulation
-            results.append(DeobfuscationResult(
-                success=False,
-                obfuscation_type=ObfuscationType.BATCH_VAR_INDEX,
-                original=content,
-                warnings=["Batch variable indexing requires emulation (Layer 2)"],
-                confidence=0.0,
-            ))
+            results.append(decode_batch_var_index(content))
 
     # Return best result or aggregate
     successful = [r for r in results if r.success]

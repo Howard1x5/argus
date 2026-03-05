@@ -112,6 +112,118 @@ def detect_systems(events: list[dict]) -> dict:
     return {k: sorted(list(v)) for k, v in systems.items()}
 
 
+def extract_iocs_from_binary(file_path: Path) -> list[dict]:
+    """Extract IOCs from binary files like disk images using strings.
+
+    This is a fallback for files we can't fully parse, to at least
+    capture network indicators, URLs, and command patterns.
+
+    Args:
+        file_path: Path to binary file
+
+    Returns:
+        List of event dicts with extracted IOCs
+    """
+    import re
+    import subprocess
+    from datetime import datetime, timezone
+
+    events = []
+    file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+
+    # Use strings command to extract printable strings
+    try:
+        result = subprocess.run(
+            ['strings', '-n', '10', str(file_path)],
+            capture_output=True,
+            timeout=120,  # 2 minute timeout for large files
+        )
+        strings_output = result.stdout.decode('utf-8', errors='replace')
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return events
+
+    # IOC patterns
+    ip_pattern = re.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
+    url_pattern = re.compile(r'(https?://[^\s"\'<>]{10,})')
+    domain_pattern = re.compile(r'\b([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}\b')
+
+    # Track seen IOCs to avoid duplicates
+    seen_iocs = set()
+
+    # Search for IPs
+    for match in ip_pattern.finditer(strings_output):
+        ip = match.group(1)
+        if ip not in seen_iocs:
+            # Validate IP octets
+            try:
+                octets = [int(x) for x in ip.split('.')]
+                if all(0 <= x <= 255 for x in octets):
+                    # Skip obviously invalid IPs
+                    if octets[0] in (0, 255) or ip.startswith('0.'):
+                        continue
+                    seen_iocs.add(ip)
+                    # Determine severity based on IP type
+                    first, second = octets[0], octets[1]
+                    is_private = (
+                        first == 10 or
+                        (first == 172 and 16 <= second <= 31) or
+                        (first == 192 and second == 168) or
+                        first == 127
+                    )
+                    events.append({
+                        'timestamp_utc': file_mtime,
+                        'source_file': str(file_path),
+                        'event_type': 'DiskImage_IOC_IP',
+                        'severity': 'medium' if is_private else 'high',
+                        'dest_ip': ip,
+                        'parser_name': 'binary_strings',
+                        'description': f"IP extracted from disk image: {ip} ({'internal' if is_private else 'external'})",
+                    })
+            except ValueError:
+                continue
+
+    # Search for URLs
+    for match in url_pattern.finditer(strings_output):
+        url = match.group(1)
+        if url not in seen_iocs:
+            seen_iocs.add(url)
+            events.append({
+                'timestamp_utc': file_mtime,
+                'source_file': str(file_path),
+                'event_type': 'DiskImage_IOC_URL',
+                'severity': 'high',
+                'uri': url,
+                'parser_name': 'binary_strings',
+                'description': f"URL extracted from disk image: {url}",
+            })
+
+    # Search for known attack patterns (bitsadmin, certutil, powershell download, etc.)
+    lolbin_patterns = {
+        r'bitsadmin.*(/transfer|/download)': ('bitsadmin', 'T1105'),
+        r'certutil.*(-decode|-urlcache)': ('certutil', 'T1140'),
+        r'powershell.*(-enc|-e\s|downloadstring|invoke-webrequest)': ('powershell', 'T1059.001'),
+        r'schtasks.*/create': ('schtasks', 'T1053.005'),
+    }
+
+    for pattern, (tool, mitre_id) in lolbin_patterns.items():
+        for match in re.finditer(pattern, strings_output, re.IGNORECASE):
+            cmd = match.group(0)[:500]  # Limit length
+            if cmd not in seen_iocs:
+                seen_iocs.add(cmd)
+                events.append({
+                    'timestamp_utc': file_mtime,
+                    'source_file': str(file_path),
+                    'event_type': 'DiskImage_LOLBin_Command',
+                    'severity': 'critical',
+                    'command_line': cmd,
+                    'process_name': tool,
+                    'parser_name': 'binary_strings',
+                    'description': f"LOLBin command found in disk image: {tool} [{mitre_id}]",
+                })
+
+    return events
+
+
 def events_to_parquet(events: list[dict], output_path: Path) -> int:
     """Convert events to Parquet file.
 
@@ -252,6 +364,23 @@ def run_ingest(case_path_str: str, auto_generate_parsers: bool = False) -> bool:
                     })
                     continue
             else:
+                # Try IOC extraction from binary files (disk images, etc.)
+                disk_image_exts = {'.vhd', '.vhdx', '.vmdk', '.img', '.raw', '.dd', '.e01'}
+                if file_path.suffix.lower() in disk_image_exts:
+                    click.echo(f"  Disk image detected - extracting IOCs via strings")
+                    ioc_events = extract_iocs_from_binary(file_path)
+                    if ioc_events:
+                        events = ioc_events
+                        parquet_name = file_path.name + ".parquet"
+                        parquet_path = parsed_dir / parquet_name
+                        written = events_to_parquet(events, parquet_path)
+                        click.echo(f"  Saved: {parquet_name} ({written} IOC events)")
+                        stats["files_parsed"] += 1
+                        stats["total_events"] += written
+                        continue
+                    else:
+                        click.echo(click.style(f"  No IOCs extracted", fg="yellow"))
+
                 click.echo(click.style(f"  Unknown format - skipping", fg="yellow"))
                 stats["files_failed"] += 1
                 stats["failures"].append({
