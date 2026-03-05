@@ -288,8 +288,8 @@ def run_ingest(case_path_str: str, auto_generate_parsers: bool = False) -> bool:
                 if len(result.warnings) > 3:
                     click.echo(f"  ... and {len(result.warnings) - 3} more warnings")
 
-            # Write to Parquet
-            parquet_name = file_path.stem + ".parquet"
+            # Write to Parquet (use full filename to avoid collision, e.g., run.bat vs run.ps1)
+            parquet_name = file_path.name + ".parquet"
             parquet_path = parsed_dir / parquet_name
             written = events_to_parquet(events, parquet_path)
             click.echo(f"  Saved: {parquet_name} ({written} events)")

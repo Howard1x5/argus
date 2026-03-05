@@ -12,9 +12,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+import pyarrow.parquet as pq
+
+
+def load_parquet_as_text(filepath: Path) -> str:
+    """Load a parquet file and convert to searchable text.
+
+    Args:
+        filepath: Path to parquet file
+
+    Returns:
+        Text representation of parquet contents for searching
+    """
+    try:
+        df = pd.read_parquet(filepath)
+        if df.empty:
+            return ""
+
+        # Convert all columns to string and concatenate
+        text_parts = []
+        for _, row in df.iterrows():
+            row_text = " ".join(str(v) for v in row.values if pd.notna(v) and str(v) != "")
+            text_parts.append(row_text)
+
+        return "\n".join(text_parts)
+    except Exception:
+        return ""
+
 
 def load_text_recursive(directory: Path) -> str:
-    """Load all text from JSON, MD, TXT files in a directory tree.
+    """Load all text from JSON, MD, TXT, and Parquet files in a directory tree.
 
     Args:
         directory: Path to search recursively
@@ -26,18 +54,25 @@ def load_text_recursive(directory: Path) -> str:
         return ""
 
     text_parts = []
-    extensions = {'.json', '.md', '.txt', '.yaml', '.yml'}
+    text_extensions = {'.json', '.md', '.txt', '.yaml', '.yml'}
+    parquet_extensions = {'.parquet', '.pq'}
 
     for root, _, files in os.walk(directory):
         for filename in files:
-            if Path(filename).suffix.lower() in extensions:
-                filepath = Path(root) / filename
+            filepath = Path(root) / filename
+            suffix = filepath.suffix.lower()
+
+            if suffix in text_extensions:
                 try:
                     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
                         text_parts.append(f"\n=== {filepath} ===\n{content}")
                 except (IOError, OSError):
                     continue
+            elif suffix in parquet_extensions:
+                content = load_parquet_as_text(filepath)
+                if content:
+                    text_parts.append(f"\n=== {filepath} ===\n{content}")
 
     return "\n".join(text_parts)
 
