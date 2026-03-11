@@ -249,7 +249,51 @@ class MemoryParser(BaseParser):
             logger.error(f"File carving failed: {e}", exc_info=True)
             result.add_warning(f"File carving failed: {str(e)}")
 
-        result.metadata["plugins_run"] = self.TRIAGE_PLUGINS + ["strings_analysis", "file_carving"]
+        # Run YARA scanning for malware family identification
+        try:
+            yara_events = self._run_yara_scan(file_path, line_num + len(strings_events))
+            for event in yara_events:
+                result.add_event(event)
+            logger.info(f"YARA scan returned {len(yara_events)} matches")
+        except Exception as e:
+            logger.error(f"YARA scan failed: {e}", exc_info=True)
+            result.add_warning(f"YARA scan failed: {str(e)}")
+
+        # Detect DKOM-hidden processes (handles vs pslist cross-reference + raw memory scan)
+        hidden_pids = set()
+        try:
+            dkom_events = self._detect_dkom_hidden_processes(
+                file_path, result.events, line_num + len(strings_events) + len(yara_events)
+            )
+            for event in dkom_events:
+                result.add_event(event)
+                ed = event.to_dict() if hasattr(event, 'to_dict') else {}
+                pid = ed.get('process_id')
+                if pid:
+                    hidden_pids.add(int(pid))
+            logger.info(f"DKOM detection returned {len(dkom_events)} events")
+        except Exception as e:
+            logger.error(f"DKOM detection failed: {e}", exc_info=True)
+            result.add_warning(f"DKOM detection failed: {str(e)}")
+
+        # Run malfind on hidden process PIDs
+        if hidden_pids:
+            try:
+                hidden_malfind = self._run_hidden_process_malfind(
+                    file_path, vol_cmd, symbols_path, hidden_pids,
+                    line_num + len(strings_events) + len(yara_events) + len(dkom_events)
+                )
+                for event in hidden_malfind:
+                    result.add_event(event)
+                logger.info(f"Hidden process malfind returned {len(hidden_malfind)} events")
+            except Exception as e:
+                logger.error(f"Hidden process malfind failed: {e}", exc_info=True)
+                result.add_warning(f"Hidden process malfind failed: {str(e)}")
+
+        result.metadata["plugins_run"] = self.TRIAGE_PLUGINS + [
+            "strings_analysis", "file_carving", "yara_scan",
+            "dkom_detection", "hidden_process_malfind",
+        ]
         result.metadata["symbols_path"] = str(symbols_path) if symbols_path else None
         return result
 
@@ -413,6 +457,18 @@ class MemoryParser(BaseParser):
             re.compile(r'\bCollab\.getIcon\b'),
             re.compile(r'\bmedia\.newPlayer\b'),
         ]
+        # Known malware family keywords — match in file paths and strings
+        malware_keywords = [
+            "emotet", "trickbot", "cobalt", "mimikatz", "meterpreter",
+            "covenant", "empire", "dridex", "qbot", "qakbot", "icedid",
+            "bazarloader", "ryuk", "conti", "lockbit", "revil", "sodinokibi",
+            "wannacry", "petya", "notpetya", "zeus", "kronos", "ursnif",
+            "gozi", "isfb", "hancitor", "poshc2", "sliver",
+        ]
+        malware_kw_pattern = re.compile(
+            r'\b(' + '|'.join(re.escape(kw) for kw in malware_keywords) + r')\b',
+            re.IGNORECASE,
+        )
 
         events = []
         line_num = start_line
@@ -424,6 +480,7 @@ class MemoryParser(BaseParser):
         seen_php = set()
         seen_js_funcs = set()
         seen_exploit_apis = set()
+        seen_malware_kw = set()
 
         # Skip common private/broadcast IPs that aren't interesting
         boring_ips = {
@@ -569,10 +626,32 @@ class MemoryParser(BaseParser):
                         }),
                     ))
 
+            # Extract malware family keywords from file paths and strings
+            for match in malware_kw_pattern.finditer(line):
+                kw = match.group().lower()
+                if kw in seen_malware_kw:
+                    continue
+                seen_malware_kw.add(kw)
+                line_num += 1
+                events.append(UnifiedEvent(
+                    timestamp_utc=datetime.now(timezone.utc),
+                    source_file=file_path.name,
+                    source_line=line_num,
+                    event_type="Memory_strings_ioc",
+                    severity=EventSeverity.CRITICAL,
+                    process_name=f"strings_malware_keyword:{kw}",
+                    raw_payload=json.dumps({
+                        "ioc_type": "malware_keyword",
+                        "value": kw,
+                        "context": line[:500],
+                    }),
+                ))
+
         logger.info(
             f"Strings extraction: {len(seen_ips)} IPs, {len(seen_urls)} URLs, "
             f"{len(seen_domains)} domains, {len(seen_php)} PHP paths, "
-            f"{len(seen_js_funcs)} JS functions, {len(seen_exploit_apis)} exploit APIs"
+            f"{len(seen_js_funcs)} JS functions, {len(seen_exploit_apis)} exploit APIs, "
+            f"{len(seen_malware_kw)} malware keywords"
         )
         return events
 
@@ -668,6 +747,333 @@ class MemoryParser(BaseParser):
                         logger.warning(f"Failed to hash carved file {carved_file}: {e}")
 
         logger.info(f"File carving: {len(events)} files carved from {len(pids)} PIDs")
+        return events
+
+    def _run_yara_scan(self, file_path: Path, start_line: int) -> list:
+        """Run YARA rules against memory dump to identify malware families."""
+        if not shutil.which("yara"):
+            logger.warning("yara not found — skipping YARA scan")
+            return []
+
+        yara_rule_dirs = [
+            Path("/usr/local/yara-rules/malware"),
+            Path("/usr/share/yara-rules/malware"),
+            Path("/opt/yara-rules/malware"),
+        ]
+
+        rule_dir = None
+        for d in yara_rule_dirs:
+            if d.exists():
+                rule_dir = d
+                break
+        if not rule_dir:
+            logger.warning("No YARA malware rules found — skipping scan")
+            return []
+
+        events = []
+        line_num = start_line
+        seen_rules = set()
+
+        # Run each .yar file individually to avoid compile errors stopping everything
+        for yar_file in sorted(rule_dir.glob("*.yar")):
+            try:
+                proc = subprocess.run(
+                    ["yara", str(yar_file), str(file_path)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                for yara_line in proc.stdout.strip().split("\n"):
+                    yara_line = yara_line.strip()
+                    if not yara_line:
+                        continue
+                    rule_name = yara_line.split()[0] if yara_line.split() else ""
+                    if rule_name and rule_name not in seen_rules:
+                        seen_rules.add(rule_name)
+                        line_num += 1
+                        events.append(UnifiedEvent(
+                            timestamp_utc=datetime.now(timezone.utc),
+                            source_file=file_path.name,
+                            source_line=line_num,
+                            event_type="Memory_yara_match",
+                            severity=EventSeverity.CRITICAL,
+                            process_name=f"yara:{rule_name}",
+                            raw_payload=json.dumps({
+                                "rule_name": rule_name,
+                                "rule_file": yar_file.name,
+                            }),
+                        ))
+            except subprocess.TimeoutExpired:
+                logger.warning(f"YARA scan timed out for {yar_file.name}")
+            except Exception as e:
+                logger.debug(f"YARA scan error for {yar_file.name}: {e}")
+
+        logger.info(f"YARA scan: {len(seen_rules)} rule matches")
+        return events
+
+    def _detect_dkom_hidden_processes(
+        self, file_path: Path, existing_events: list, start_line: int
+    ) -> list:
+        """Detect DKOM-hidden processes by cross-referencing handles vs pslist.
+
+        When a process is unlinked from ActiveProcessLinks and its pool tag is
+        modified, Vol3 pslist/psscan/psxview all miss it. But handles from other
+        processes (especially System PID 4) still reference it.
+
+        For found hidden processes, reads raw memory to extract:
+        - Physical EPROCESS offset
+        - Pool tag (from pool header)
+        - Pool tag physical address
+        """
+        import re as _re
+        import struct
+
+        events = []
+        line_num = start_line
+
+        # Collect all known PIDs from pslist
+        pslist_pids = set()
+        for event in existing_events:
+            ed = event.to_dict() if hasattr(event, 'to_dict') else {}
+            et = ed.get('event_type', '')
+            if 'pslist' in et.lower() or 'pstree' in et.lower():
+                pid = ed.get('process_id')
+                if pid:
+                    pslist_pids.add(int(pid))
+
+        # Collect PIDs referenced in handles (pattern: "xxx.exe Pid NNNN")
+        handle_pids = {}  # pid -> process_name
+        handle_pattern = _re.compile(r'\b([a-zA-Z0-9_][a-zA-Z0-9_./-]*\.exe)\s+Pid\s+(\d+)', _re.IGNORECASE)
+        for event in existing_events:
+            ed = event.to_dict() if hasattr(event, 'to_dict') else {}
+            if 'handles' not in str(ed.get('event_type', '')).lower():
+                continue
+            rp = ed.get('raw_payload', '')
+            if isinstance(rp, str):
+                # Try JSON parse first for clean field access
+                try:
+                    rp_data = json.loads(rp)
+                    handle_name = rp_data.get('handle_name', '')
+                    if isinstance(handle_name, str):
+                        match = handle_pattern.search(handle_name)
+                        if match:
+                            handle_pids[int(match.group(2))] = match.group(1)
+                            continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                # Fallback: regex on raw string
+                match = handle_pattern.search(rp)
+                if match:
+                    handle_pids[int(match.group(2))] = match.group(1)
+
+        # Find hidden PIDs: in handles but NOT in pslist
+        hidden_pids = {
+            pid: name for pid, name in handle_pids.items()
+            if pid not in pslist_pids and pid > 4
+        }
+
+        if not hidden_pids:
+            logger.info("DKOM detection: no hidden processes found")
+            return events
+
+        logger.info(
+            f"DKOM detection: {len(hidden_pids)} hidden processes found: "
+            f"{', '.join(f'{n}({p})' for p, n in hidden_pids.items())}"
+        )
+
+        # EPROCESS layouts for different Windows versions
+        eprocess_layouts = [
+            {"name": "Win7x64", "pid_off": 0x180, "name_off": 0x2e0, "obj_hdr_to_pool": 0x60},
+            {"name": "Win10x64", "pid_off": 0x2e0, "name_off": 0x450, "obj_hdr_to_pool": 0x50},
+            {"name": "Win10_1903x64", "pid_off": 0x2e8, "name_off": 0x450, "obj_hdr_to_pool": 0x50},
+        ]
+
+        file_size = file_path.stat().st_size
+        chunk_size = 64 * 1024 * 1024  # 64MB chunks
+
+        for pid, proc_name in hidden_pids.items():
+            expected_name = proc_name.split('.')[0].lower()[:15]
+
+            # Strategy 1: Scan for non-standard pool tags before EPROCESS structures
+            # Standard pool tag is "Proc" — modified tags indicate DKOM
+            # For each candidate, validate by checking PID and ImageFileName
+            found = False
+            with open(file_path, 'rb') as f:
+                offset = 0
+                while offset < file_size and not found:
+                    f.seek(offset)
+                    chunk = f.read(chunk_size + 0x500)
+                    if not chunk:
+                        break
+
+                    # Search for process name string in chunk (EPROCESS ImageFileName)
+                    name_bytes = proc_name.encode('ascii')[:15]
+                    pos = 0
+                    while pos < len(chunk) - 0x500:
+                        idx = chunk.find(name_bytes, pos)
+                        if idx == -1:
+                            break
+
+                        # For each layout, check if name is at the right offset from EPROCESS start
+                        for layout in eprocess_layouts:
+                            eproc_start = idx - layout["name_off"]
+                            if eproc_start < 0 or eproc_start + layout["pid_off"] + 8 > len(chunk):
+                                continue
+
+                            # Validate PID at expected offset
+                            candidate_pid = struct.unpack_from('<I', chunk, eproc_start + layout["pid_off"])[0]
+                            if candidate_pid != pid:
+                                continue
+
+                            # Double-check: EPROCESS should be 8-byte aligned
+                            phys_offset = offset + eproc_start
+                            if phys_offset % 8 != 0:
+                                continue
+
+                            # Found valid EPROCESS! Now read pool header
+                            pool_tag = ""
+                            pool_tag_addr = 0
+                            pool_header_base = 0
+
+                            for delta in [layout["obj_hdr_to_pool"], 0x50, 0x40, 0x60, 0x70]:
+                                ph_start = eproc_start - delta
+                                if ph_start < 0 or ph_start + 8 > len(chunk):
+                                    continue
+                                candidate_tag = chunk[ph_start + 4:ph_start + 8]
+                                try:
+                                    tag_str = candidate_tag.decode('ascii')
+                                    if all(32 <= ord(c) < 127 for c in tag_str):
+                                        pool_tag = tag_str
+                                        pool_header_base = offset + ph_start
+                                        pool_tag_addr = pool_header_base + 4
+                                        break
+                                except (UnicodeDecodeError, ValueError):
+                                    continue
+
+                            logger.info(
+                                f"DKOM: Found hidden EPROCESS for {proc_name} (PID {pid}) "
+                                f"at physical 0x{phys_offset:x}, pool_tag={pool_tag!r}"
+                            )
+
+                            line_num += 1
+                            events.append(UnifiedEvent(
+                                timestamp_utc=datetime.now(timezone.utc),
+                                source_file=file_path.name,
+                                source_line=line_num,
+                                event_type="Memory_dkom_hidden",
+                                severity=EventSeverity.CRITICAL,
+                                process_id=pid,
+                                process_name=proc_name,
+                                raw_payload=json.dumps({
+                                    "pid": pid,
+                                    "process_name": proc_name,
+                                    "physical_offset": f"0x{phys_offset:016x}",
+                                    "eprocess_layout": layout["name"],
+                                    "pool_tag": pool_tag,
+                                    "pool_tag_address": f"0x{pool_tag_addr:X}" if pool_tag_addr else "",
+                                    "pool_header_base": f"0x{pool_header_base:X}" if pool_header_base else "",
+                                    "detection_method": "handles_vs_pslist_crossref",
+                                    "hidden_from": ["pslist", "psscan", "psxview"],
+                                }),
+                            ))
+                            found = True
+                            break
+                        if found:
+                            break
+                        pos = idx + 1
+                    offset += chunk_size
+
+            if not found:
+                line_num += 1
+                events.append(UnifiedEvent(
+                    timestamp_utc=datetime.now(timezone.utc),
+                    source_file=file_path.name,
+                    source_line=line_num,
+                    event_type="Memory_dkom_hidden",
+                    severity=EventSeverity.CRITICAL,
+                    process_id=pid,
+                    process_name=proc_name,
+                    raw_payload=json.dumps({
+                        "pid": pid,
+                        "process_name": proc_name,
+                        "physical_offset": "",
+                        "detection_method": "handles_vs_pslist_crossref",
+                        "hidden_from": ["pslist", "psscan", "psxview"],
+                    }),
+                ))
+
+        logger.info(f"DKOM detection: {len(events)} hidden process events")
+        return events
+
+    def _run_hidden_process_malfind(
+        self, file_path: Path, vol_cmd: str, symbols_path: Optional[Path],
+        hidden_pids: set, start_line: int
+    ) -> list:
+        """Run malfind specifically for hidden process PIDs.
+
+        Vol3 malfind --pid works even on DKOM-hidden processes because it
+        accesses the EPROCESS directly by PID rather than iterating pslist.
+        """
+        events = []
+        line_num = start_line
+
+        for pid in sorted(hidden_pids):
+            cmd = [vol_cmd]
+            if symbols_path:
+                cmd.extend(["-s", str(symbols_path)])
+            cmd.extend([
+                "-f", str(file_path),
+                "-r", "json",
+                "windows.malfind",
+                "--pid", str(pid),
+            ])
+
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                )
+                if proc.returncode != 0:
+                    logger.warning(f"malfind failed for hidden PID {pid}: {proc.stderr[:200]}")
+                    continue
+
+                # Parse JSON output
+                try:
+                    records = json.loads(proc.stdout) if proc.stdout.strip() else []
+                except json.JSONDecodeError:
+                    records = []
+
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    line_num += 1
+                    protection = record.get("Protection") or ""
+                    events.append(UnifiedEvent(
+                        timestamp_utc=datetime.now(timezone.utc),
+                        source_file=file_path.name,
+                        source_line=line_num,
+                        event_type="Memory_malfind",
+                        severity=EventSeverity.CRITICAL,
+                        process_id=pid,
+                        process_name=record.get("Process") or record.get("ImageFileName") or f"hidden_pid_{pid}",
+                        raw_payload=json.dumps({
+                            "pid": pid,
+                            "process": record.get("Process") or record.get("ImageFileName"),
+                            "start_vpn": record.get("Start VPN") or record.get("StartVPN"),
+                            "end_vpn": record.get("End VPN") or record.get("EndVPN"),
+                            "tag": record.get("Tag"),
+                            "protection": protection,
+                            "committed_pages": record.get("CommittedPages"),
+                            "private_memory": record.get("PrivateMemory"),
+                            "hexdump": record.get("Hexdump", "")[:200],
+                            "disasm": record.get("Disasm", "")[:200],
+                            "hidden_process": True,
+                        }),
+                    ))
+                logger.info(f"malfind for hidden PID {pid}: {len(records)} hits")
+
+            except subprocess.TimeoutExpired:
+                logger.warning(f"malfind timed out for hidden PID {pid}")
+            except Exception as e:
+                logger.warning(f"malfind error for hidden PID {pid}: {e}")
+
         return events
 
     def _parse_record(

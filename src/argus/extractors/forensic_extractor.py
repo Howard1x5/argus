@@ -2839,9 +2839,19 @@ class ForensicExtractor:
         for event in events:
             event_type = str(event.get("event_type", "")).lower()
             if "memory_malfind" in event_type:
+                raw = {}
+                try:
+                    raw = json.loads(event.get("raw_payload", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 malfind_hits.append({
                     "process_name": event.get("process_name"),
                     "process_id": event.get("process_id"),
+                    "protection": raw.get("protection", ""),
+                    "start_vpn": raw.get("start_vpn"),
+                    "end_vpn": raw.get("end_vpn"),
+                    "tag": raw.get("tag"),
+                    "hidden_process": raw.get("hidden_process", False),
                     "source_file": event.get("_source_parquet"),
                 })
 
@@ -2908,6 +2918,7 @@ class ForensicExtractor:
         php_paths = []
         js_functions = []
         exploit_apis = []
+        malware_keywords = []
 
         for event in events:
             event_type = str(event.get("event_type", "")).lower()
@@ -2936,6 +2947,8 @@ class ForensicExtractor:
                 js_functions.append(entry)
             elif ioc_type == "exploit_api":
                 exploit_apis.append(entry)
+            elif ioc_type == "malware_keyword":
+                malware_keywords.append(entry)
 
         result = {
             "ip_addresses": ips,
@@ -2950,6 +2963,8 @@ class ForensicExtractor:
             "js_function_count": len(js_functions),
             "exploit_apis": exploit_apis,
             "exploit_api_count": len(exploit_apis),
+            "malware_keywords": malware_keywords,
+            "malware_keyword_count": len(malware_keywords),
         }
 
         self._save_extraction("strings_iocs.json", result)
@@ -3103,6 +3118,175 @@ class ForensicExtractor:
         return result
 
     # =========================================================================
+    # EXTRACTION: System Profile (OS identification from memory metadata)
+    # =========================================================================
+    def extract_system_profile(self) -> dict:
+        """Derive OS profile from Vol3 windows.info system metadata."""
+        click.echo("  Extracting system profile...")
+
+        events = self.load_all_events()
+        system_info = {}
+
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_system_info" not in event_type:
+                continue
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            var_name = raw.get("variable", "")
+            var_value = raw.get("value", "")
+            if var_name:
+                system_info[var_name] = var_value
+
+        # Derive profile from NTBuildLab and other fields
+        nt_build_lab = system_info.get("NTBuildLab", "")
+        major = system_info.get("NtMajorVersion", "")
+        minor = system_info.get("NtMinorVersion", "")
+        is_64bit = system_info.get("Is64Bit", "")
+        arch = "x64" if str(is_64bit).lower() == "true" else "x86"
+
+        # Build profile string from NTBuildLab
+        profile = ""
+        if nt_build_lab:
+            lab_lower = nt_build_lab.lower()
+            if "win7sp1" in lab_lower or ("7601" in lab_lower and "sp1" in lab_lower):
+                profile = f"Win7SP1{arch}"
+            elif "win7" in lab_lower or "7600" in lab_lower:
+                profile = f"Win7SP0{arch}"
+            elif "win8" in lab_lower or "9200" in lab_lower:
+                profile = f"Win8{arch}"
+            elif "win81" in lab_lower or "9600" in lab_lower:
+                profile = f"Win8.1{arch}"
+            elif str(major) == "6" and str(minor) == "1":
+                sp = "SP1" if "sp1" in lab_lower or "7601" in nt_build_lab else "SP0"
+                profile = f"Win7{sp}{arch}"
+            elif str(major) == "6" and str(minor) == "2":
+                profile = f"Win8{arch}"
+            elif str(major) == "6" and str(minor) == "3":
+                profile = f"Win8.1{arch}"
+            elif str(major) == "10":
+                profile = f"Win10{arch}"
+            elif str(major) == "5" and str(minor) == "1":
+                profile = f"WinXPSP3{arch}"
+
+        build_num = ""
+        if nt_build_lab:
+            parts = nt_build_lab.split(".")
+            if len(parts) >= 2 and parts[1].isdigit():
+                build_num = parts[1]
+
+        result = {
+            "profile": profile,
+            "nt_build_lab": nt_build_lab,
+            "nt_major_version": major,
+            "nt_minor_version": minor,
+            "architecture": arch,
+            "is_64bit": is_64bit,
+            "build_number": build_num,
+            "kdbg_address": system_info.get("KdDebuggerDataBlock", ""),
+            "system_time": system_info.get("SystemTime", ""),
+            "system_root": system_info.get("NtSystemRoot", ""),
+            "all_info": system_info,
+        }
+
+        self._save_extraction("system_profile.json", result)
+        click.echo(f"    Profile: {profile}, Build: {nt_build_lab}")
+        return result
+
+    # =========================================================================
+    # EXTRACTION: DKOM Hidden Processes
+    # =========================================================================
+    def extract_hidden_processes(self) -> dict:
+        """Extract DKOM-hidden process information from memory analysis."""
+        click.echo("  Extracting hidden processes...")
+
+        events = self.load_all_events()
+        hidden = []
+        malfind_hidden = []
+
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            if "memory_dkom_hidden" in event_type:
+                hidden.append({
+                    "pid": raw.get("pid"),
+                    "process_name": raw.get("process_name"),
+                    "physical_offset": raw.get("physical_offset"),
+                    "pool_tag": raw.get("pool_tag"),
+                    "pool_tag_address": raw.get("pool_tag_address"),
+                    "pool_header_base": raw.get("pool_header_base"),
+                    "detection_method": raw.get("detection_method"),
+                    "hidden_from": raw.get("hidden_from", []),
+                    "eprocess_layout": raw.get("eprocess_layout"),
+                    "source_file": event.get("_source_parquet"),
+                })
+
+            if "memory_malfind" in event_type and raw.get("hidden_process"):
+                malfind_hidden.append({
+                    "pid": raw.get("pid"),
+                    "process": raw.get("process"),
+                    "start_vpn": raw.get("start_vpn"),
+                    "end_vpn": raw.get("end_vpn"),
+                    "tag": raw.get("tag"),
+                    "protection": raw.get("protection"),
+                    "hexdump": raw.get("hexdump", "")[:100],
+                    "source_file": event.get("_source_parquet"),
+                })
+
+        result = {
+            "hidden_processes": hidden,
+            "hidden_count": len(hidden),
+            "malfind_hidden": malfind_hidden,
+            "malfind_hidden_count": len(malfind_hidden),
+        }
+
+        self._save_extraction("hidden_processes.json", result)
+        click.echo(f"    Found {len(hidden)} hidden processes, {len(malfind_hidden)} malfind hits")
+        return result
+
+    # =========================================================================
+    # EXTRACTION: YARA Matches
+    # =========================================================================
+    def extract_yara_matches(self) -> dict:
+        """Extract YARA rule matches from memory scanning."""
+        click.echo("  Extracting YARA matches...")
+
+        events = self.load_all_events()
+        matches = []
+
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_yara_match" not in event_type:
+                continue
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            matches.append({
+                "rule_name": raw.get("rule_name"),
+                "rule_file": raw.get("rule_file"),
+                "source_file": event.get("_source_parquet"),
+            })
+
+        result = {
+            "yara_matches": matches,
+            "yara_match_count": len(matches),
+        }
+
+        self._save_extraction("yara_matches.json", result)
+        click.echo(f"    Found {len(matches)} YARA matches")
+        return result
+
+    # =========================================================================
     # MAIN EXTRACTION RUNNER
     # =========================================================================
     def run_all_extractions(self) -> dict:
@@ -3154,6 +3338,12 @@ class ForensicExtractor:
             "carved_files": self.extract_carved_files(),
             # Exploit signature → CVE mapping
             "exploit_signatures": self.extract_exploit_signatures(),
+            # System profile (OS identification from memory metadata)
+            "system_profile": self.extract_system_profile(),
+            # DKOM hidden process detection
+            "hidden_processes": self.extract_hidden_processes(),
+            # YARA rule matches
+            "yara_matches": self.extract_yara_matches(),
         }
 
         # Save summary
