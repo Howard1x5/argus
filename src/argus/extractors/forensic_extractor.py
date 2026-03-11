@@ -195,7 +195,10 @@ class ForensicExtractor:
             # Sysmon EID 1 or Windows Security EID 4688
             is_process_create = (
                 event_id == 1 or event_id == 4688 or
-                any(x in event_type for x in ["sysmon_1", "sysmon 1", "process"])
+                any(x in event_type for x in [
+                    "sysmon_1", "sysmon 1", "process",
+                    "memory_pslist", "memory_pstree", "memory_cmdline",
+                ])
             )
             if is_process_create:
                 process_events.append(event)
@@ -255,6 +258,66 @@ class ForensicExtractor:
                     "indicator": "credential_dump",
                 })
 
+        # Process masquerading detection (T1036)
+        # System processes that should only run under specific parents
+        expected_parents = {
+            "svchost.exe": ["services.exe"],
+            "csrss.exe": ["smss.exe"],
+            "wininit.exe": ["smss.exe"],
+            "services.exe": ["wininit.exe"],
+            "lsass.exe": ["wininit.exe"],
+            "lsaiso.exe": ["wininit.exe"],
+            "taskhost.exe": ["svchost.exe", "services.exe"],
+            "taskhostw.exe": ["svchost.exe", "services.exe"],
+            "runtimebroker.exe": ["svchost.exe"],
+            "dllhost.exe": ["svchost.exe", "services.exe"],
+            "wmiprvse.exe": ["svchost.exe"],
+        }
+        # Suspicious parent-child pairs (exploit chains)
+        exploit_chain_parents = {
+            "acroRd32.exe": ["firefox.exe", "iexplore.exe", "chrome.exe", "outlook.exe"],
+            "winword.exe": ["explorer.exe"],
+            "excel.exe": ["explorer.exe"],
+            "powerpnt.exe": ["explorer.exe"],
+        }
+        masquerading = []
+        exploit_chains = []
+        for event in process_events:
+            proc_name = str(event.get("process_name") or "").lower()
+            parent_name = str(event.get("parent_process_name") or "").lower()
+            # For memory events, resolve parent name from PID if not set
+            if not parent_name and event.get("parent_process_id"):
+                ppid = event.get("parent_process_id")
+                parent_event = process_by_pid.get(ppid, {})
+                parent_name = str(parent_event.get("process_name") or "").lower()
+
+            if proc_name in expected_parents and parent_name:
+                valid_parents = expected_parents[proc_name]
+                if not any(vp in parent_name for vp in valid_parents):
+                    masquerading.append({
+                        "timestamp": str(event.get("timestamp_utc", "")),
+                        "process_name": event.get("process_name"),
+                        "process_id": event.get("process_id"),
+                        "parent_process_name": parent_name,
+                        "parent_process_id": event.get("parent_process_id"),
+                        "expected_parents": valid_parents,
+                        "indicator": "process_masquerading_T1036",
+                        "source_file": event.get("_source_parquet"),
+                    })
+
+            # Detect exploit chain patterns (e.g., firefox → AcroRd32)
+            if proc_name in exploit_chain_parents and parent_name:
+                if any(ep in parent_name for ep in exploit_chain_parents[proc_name]):
+                    exploit_chains.append({
+                        "timestamp": str(event.get("timestamp_utc", "")),
+                        "process_name": event.get("process_name"),
+                        "process_id": event.get("process_id"),
+                        "parent_process_name": parent_name,
+                        "parent_process_id": event.get("parent_process_id"),
+                        "indicator": "exploit_chain",
+                        "source_file": event.get("_source_parquet"),
+                    })
+
         result = {
             "total_process_events": len(process_events),
             "unique_pids": len(process_by_pid),
@@ -264,11 +327,15 @@ class ForensicExtractor:
             "services_children_count": len(services_children),
             "credential_processes": credential_processes,
             "credential_processes_count": len(credential_processes),
+            "masquerading": masquerading,
+            "masquerading_count": len(masquerading),
+            "exploit_chains": exploit_chains,
+            "exploit_chains_count": len(exploit_chains),
         }
 
         # Save extraction
         self._save_extraction("process_trees.json", result)
-        click.echo(f"    Found {len(w3wp_children)} w3wp children, {len(credential_processes)} credential processes")
+        click.echo(f"    Found {len(w3wp_children)} w3wp children, {len(credential_processes)} credential processes, {len(masquerading)} masquerading, {len(exploit_chains)} exploit chains")
 
         return result
 
@@ -586,6 +653,24 @@ class ForensicExtractor:
                         "source_file": event.get("_source_parquet"),
                     })
 
+        # Memory-derived password hashes (hashdump)
+        hashdump_entries = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_hashdump" in event_type:
+                raw = {}
+                try:
+                    raw = json.loads(event.get("raw_payload", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                hashdump_entries.append({
+                    "user": raw.get("user") or event.get("username"),
+                    "rid": raw.get("rid"),
+                    "lmhash": raw.get("lmhash"),
+                    "nthash": raw.get("nthash"),
+                    "source_file": event.get("_source_parquet"),
+                })
+
         result = {
             "credential_tools": credential_tools,
             "credential_tools_count": len(credential_tools),
@@ -593,10 +678,12 @@ class ForensicExtractor:
             "auth_events_count": len(auth_events),
             "lsass_access": lsass_access,
             "lsass_access_count": len(lsass_access),
+            "hashdump_entries": hashdump_entries,
+            "hashdump_count": len(hashdump_entries),
         }
 
         self._save_extraction("credential_access.json", result)
-        click.echo(f"    Found {len(credential_tools)} credential tool uses, {len(lsass_access)} LSASS access")
+        click.echo(f"    Found {len(credential_tools)} credential tool uses, {len(lsass_access)} LSASS access, {len(hashdump_entries)} hashes")
 
         return result
 
@@ -734,6 +821,26 @@ class ForensicExtractor:
                         "source_file": event.get("_source_parquet"),
                     })
 
+        # Memory-derived services (svcscan)
+        memory_services = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_svcscan" in event_type:
+                raw = {}
+                try:
+                    raw = json.loads(event.get("raw_payload", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                memory_services.append({
+                    "timestamp": str(event.get("timestamp_utc", "")),
+                    "service_name": raw.get("service_name") or event.get("process_name"),
+                    "display_name": raw.get("display_name"),
+                    "binary_path": raw.get("binary_path") or event.get("command_line"),
+                    "start_type": raw.get("start_type"),
+                    "state": raw.get("state"),
+                    "source_file": event.get("_source_parquet"),
+                })
+
         # Scheduled tasks (EID 4698)
         scheduled_tasks = []
         for event in events:
@@ -754,6 +861,8 @@ class ForensicExtractor:
             "random_services_count": len(random_services),
             "registry_persistence": registry_persistence,
             "registry_persistence_count": len(registry_persistence),
+            "memory_services": memory_services,
+            "memory_services_count": len(memory_services),
             "scheduled_tasks": scheduled_tasks,
             "scheduled_tasks_count": len(scheduled_tasks),
         }
@@ -907,12 +1016,36 @@ class ForensicExtractor:
                     "source_file": event.get("_source_parquet"),
                 })
 
+        # Process-to-file associations from handles (Memory_handles with File type)
+        handle_file_assoc = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_handles" in event_type:
+                raw = {}
+                try:
+                    raw = json.loads(event.get("raw_payload", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if raw.get("handle_type") == "File":
+                    handle_name = raw.get("handle_name") or ""
+                    handle_file_assoc.append({
+                        "timestamp": str(event.get("timestamp_utc", "")),
+                        "event_type": event.get("event_type"),
+                        "file_path": handle_name,
+                        "process_name": event.get("process_name") or raw.get("process"),
+                        "process_id": event.get("process_id") or raw.get("pid"),
+                        "username": event.get("username"),
+                        "source_file": event.get("_source_parquet"),
+                    })
+
         # Suspicious file locations
+        all_file_entries = file_events + handle_file_assoc
         suspicious_files = []
-        for f in file_events:
+        for f in all_file_entries:
             path = str(f.get("file_path", "")).lower()
             if any(x in path for x in ["temp", "public", "inetpub", "wwwroot", "uploads",
-                                        ".dmp", ".ps1", ".aspx", ".exe"]):
+                                        ".dmp", ".ps1", ".aspx", ".exe",
+                                        ".php", ".pdf", ".vbs", ".bat", ".cmd"]):
                 suspicious_files.append(f)
 
         # Dump files
@@ -921,6 +1054,8 @@ class ForensicExtractor:
         result = {
             "file_events": file_events[:500],
             "file_events_count": len(file_events),
+            "handle_file_associations": handle_file_assoc[:500],
+            "handle_file_associations_count": len(handle_file_assoc),
             "suspicious_files": suspicious_files,
             "suspicious_files_count": len(suspicious_files),
             "dump_files": dump_files,
@@ -928,7 +1063,7 @@ class ForensicExtractor:
         }
 
         self._save_extraction("file_operations.json", result)
-        click.echo(f"    Found {len(file_events)} file events, {len(dump_files)} dump files")
+        click.echo(f"    Found {len(file_events)} file events, {len(handle_file_assoc)} handle file associations, {len(dump_files)} dump files")
 
         return result
 
@@ -1199,6 +1334,8 @@ class ForensicExtractor:
             "invoke-expression", "iex", "invoke-command", "net.webclient",
             "start-bitstransfer", "-windowstyle hidden", "-ep bypass",
             "-executionpolicy bypass", "bypass", "-nop", "-noni",
+            "start-sleep", "sleep -s", "timeout /t",  # sandbox evasion T1497.003
+            "get-clipboard", "set-clipboard",  # clipboard access
         ]
 
         for event in events:
@@ -1575,7 +1712,10 @@ class ForensicExtractor:
             # Sysmon EID 1 or Windows Security EID 4688
             is_process_create = (
                 event_id == 1 or event_id == 4688 or
-                any(x in event_type for x in ["sysmon_1", "sysmon 1", "process"])
+                any(x in event_type for x in [
+                    "sysmon_1", "sysmon 1", "process",
+                    "memory_pslist", "memory_pstree", "memory_cmdline",
+                ])
             )
             if not is_process_create:
                 continue
@@ -2574,6 +2714,101 @@ class ForensicExtractor:
 
         return result
 
+    # =========================================================================
+    # EXTRACTION: Log Tampering Detection
+    # =========================================================================
+    def detect_log_tampering(self) -> dict:
+        """Detect potential log tampering/clearing by attackers.
+
+        Checks for:
+        - Empty or nearly empty event log files
+        - Gaps in event sequences
+        - Log clearing events (EID 1102, 104)
+        - Unusual time distributions
+        """
+        click.echo("  Detecting log tampering...")
+
+        events = self.load_all_events()
+
+        # Analyze events per source file
+        tampering_indicators = []
+        source_analysis = {}
+
+        for source_file, source_events in self.events_by_source.items():
+            event_count = len(source_events)
+
+            # Flag if very few events (likely cleared)
+            is_suspicious = False
+            reasons = []
+
+            if event_count == 0:
+                is_suspicious = True
+                reasons.append("Zero events - log file appears empty/cleared")
+            elif event_count < 10 and "Security" in source_file:
+                is_suspicious = True
+                reasons.append(f"Only {event_count} events in Security log - likely cleared")
+            elif event_count < 5 and "PowerShell" in source_file:
+                is_suspicious = True
+                reasons.append(f"Only {event_count} events in PowerShell log - likely cleared")
+
+            # Check for log clearing events (EID 1102 = Security log cleared, 104 = System log cleared)
+            clearing_events = []
+            for event in source_events:
+                event_id = event.get("event_id")
+                event_type = str(event.get("event_type", ""))
+                if event_id in [1102, 104] or "1102" in event_type or "104" in event_type:
+                    clearing_events.append({
+                        "timestamp": str(event.get("timestamp_utc", "")),
+                        "event_id": event_id,
+                        "event_type": event_type,
+                    })
+
+            if clearing_events:
+                is_suspicious = True
+                reasons.append(f"Found {len(clearing_events)} log clearing events")
+
+            source_analysis[source_file] = {
+                "event_count": event_count,
+                "is_suspicious": is_suspicious,
+                "reasons": reasons,
+                "clearing_events": clearing_events,
+            }
+
+            if is_suspicious:
+                tampering_indicators.append({
+                    "source_file": source_file,
+                    "event_count": event_count,
+                    "reasons": reasons,
+                    "clearing_events": clearing_events,
+                })
+
+        # Overall tampering assessment
+        total_events = len(events)
+        tampering_detected = len(tampering_indicators) > 0 or total_events == 0
+
+        result = {
+            "tampering_detected": tampering_detected,
+            "tampering_indicators_count": len(tampering_indicators),
+            "total_events": total_events,
+            "indicators": tampering_indicators,
+            "source_analysis": source_analysis,
+            "defense_evasion_detected": tampering_detected,
+            "mitre_technique": "T1070.001" if tampering_detected else None,
+            "summary": f"Log tampering {'DETECTED' if tampering_detected else 'not detected'}: {len(tampering_indicators)} suspicious sources, {total_events} total events",
+        }
+
+        if tampering_detected:
+            result["recommendation"] = "Event logs appear to have been cleared. Look for alternative evidence sources: Prefetch files, MFT, Registry, malicious scripts on disk."
+
+        self._save_extraction("log_tampering_detection.json", result)
+
+        if tampering_detected:
+            click.echo(click.style(f"    ⚠ LOG TAMPERING DETECTED: {len(tampering_indicators)} suspicious sources", fg="yellow"))
+        else:
+            click.echo(f"    No log tampering indicators found")
+
+        return result
+
     def _summarize_event(self, event: dict) -> str:
         """Create a brief summary of an event."""
         event_type = event.get("event_type", "unknown")
@@ -2591,10 +2826,287 @@ class ForensicExtractor:
             return f"Event: {event_type}"
 
     # =========================================================================
+    # EXTRACTION: Memory Injection Detection
+    # =========================================================================
+    def extract_memory_injections(self) -> dict:
+        """Extract memory injection indicators from malfind and ldrmodules."""
+        click.echo("  Extracting memory injection indicators...")
+
+        events = self.load_all_events()
+
+        # Malfind hits (injected code in process memory)
+        malfind_hits = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_malfind" in event_type:
+                malfind_hits.append({
+                    "process_name": event.get("process_name"),
+                    "process_id": event.get("process_id"),
+                    "source_file": event.get("_source_parquet"),
+                })
+
+        # Ldrmodules discrepancies (DLLs not in all loader lists = injection)
+        ldr_injections = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_ldrmodules" in event_type:
+                raw = {}
+                try:
+                    raw = json.loads(event.get("raw_payload", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                in_load = raw.get("in_load", True)
+                in_init = raw.get("in_init", True)
+                in_mem = raw.get("in_mem", True)
+                if not (in_load and in_init and in_mem):
+                    ldr_injections.append({
+                        "process_name": raw.get("process") or event.get("process_name"),
+                        "process_id": raw.get("pid") or event.get("process_id"),
+                        "mapped_path": raw.get("mapped_path") or event.get("command_line"),
+                        "in_load": in_load,
+                        "in_init": in_init,
+                        "in_mem": in_mem,
+                        "source_file": event.get("_source_parquet"),
+                    })
+
+        # NTFS ADS findings
+        ads_findings = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_mftscan" in event_type:
+                ads_findings.append({
+                    "filename_ads": event.get("process_name"),
+                    "raw": event.get("raw_payload"),
+                    "source_file": event.get("_source_parquet"),
+                })
+
+        result = {
+            "malfind_hits": malfind_hits,
+            "malfind_count": len(malfind_hits),
+            "ldr_injections": ldr_injections,
+            "ldr_injection_count": len(ldr_injections),
+            "ads_findings": ads_findings,
+            "ads_count": len(ads_findings),
+        }
+
+        self._save_extraction("memory_injections.json", result)
+        click.echo(f"    Found {len(malfind_hits)} malfind hits, {len(ldr_injections)} ldrmodule discrepancies, {len(ads_findings)} ADS")
+
+        return result
+
+    # =========================================================================
+    # EXTRACTION: Memory Strings IOC Extraction
+    # =========================================================================
+    def extract_strings_iocs(self) -> dict:
+        """Extract IOCs found via strings analysis of memory dumps."""
+        click.echo("  Extracting strings-based IOCs...")
+
+        events = self.load_all_events()
+        ips = []
+        urls = []
+        domains = []
+        php_paths = []
+        js_functions = []
+        exploit_apis = []
+
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_strings_ioc" not in event_type:
+                continue
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            ioc_type = raw.get("ioc_type", "")
+            entry = {
+                "value": raw.get("value"),
+                "context": raw.get("context", "")[:200],
+                "source_file": event.get("_source_parquet"),
+            }
+            if ioc_type == "ip_address":
+                ips.append(entry)
+            elif ioc_type == "url":
+                urls.append(entry)
+            elif ioc_type == "domain":
+                domains.append(entry)
+            elif ioc_type == "php_path":
+                php_paths.append(entry)
+            elif ioc_type == "js_function":
+                js_functions.append(entry)
+            elif ioc_type == "exploit_api":
+                exploit_apis.append(entry)
+
+        result = {
+            "ip_addresses": ips,
+            "ip_count": len(ips),
+            "urls": urls,
+            "url_count": len(urls),
+            "domains": domains,
+            "domain_count": len(domains),
+            "php_paths": php_paths,
+            "php_count": len(php_paths),
+            "js_functions": js_functions,
+            "js_function_count": len(js_functions),
+            "exploit_apis": exploit_apis,
+            "exploit_api_count": len(exploit_apis),
+        }
+
+        self._save_extraction("strings_iocs.json", result)
+        click.echo(
+            f"    Found {len(ips)} IPs, {len(urls)} URLs, "
+            f"{len(domains)} domains, {len(php_paths)} PHP paths, "
+            f"{len(js_functions)} JS functions"
+        )
+        return result
+
+    # =========================================================================
+    # EXTRACTION: Carved File Hashes
+    # =========================================================================
+    def extract_carved_files(self) -> dict:
+        """Extract file hashes from memory-carved files."""
+        click.echo("  Extracting carved file hashes...")
+
+        events = self.load_all_events()
+        carved = []
+
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_carved_file" not in event_type:
+                continue
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            carved.append({
+                "pid": raw.get("pid"),
+                "file_type": raw.get("file_type"),
+                "file_size": raw.get("file_size"),
+                "md5": raw.get("md5"),
+                "sha256": raw.get("sha256"),
+                "carved_name": raw.get("carved_name"),
+                "source_file": event.get("_source_parquet"),
+            })
+
+        result = {
+            "carved_files": carved,
+            "carved_count": len(carved),
+        }
+
+        self._save_extraction("carved_files.json", result)
+        click.echo(f"    Found {len(carved)} carved files")
+        return result
+
+    # =========================================================================
+    # EXTRACTION: Exploit Signature → CVE Mapping
+    # =========================================================================
+
+    # Known exploit function/pattern → CVE mappings
+    EXPLOIT_SIGNATURES = [
+        {
+            "pattern": "util.printf",
+            "context_patterns": ["acro", "pdf", "reader"],
+            "cve": "CVE-2008-2992",
+            "description": "Adobe Acrobat Reader util.printf buffer overflow",
+            "mitre": "T1203",
+        },
+        {
+            "pattern": "Collab.collectEmailInfo",
+            "context_patterns": ["acro", "pdf", "reader"],
+            "cve": "CVE-2007-5659",
+            "description": "Adobe Acrobat Reader Collab.collectEmailInfo buffer overflow",
+            "mitre": "T1203",
+        },
+        {
+            "pattern": "Collab.getIcon",
+            "context_patterns": ["acro", "pdf", "reader"],
+            "cve": "CVE-2009-0927",
+            "description": "Adobe Acrobat Reader Collab.getIcon buffer overflow",
+            "mitre": "T1203",
+        },
+        {
+            "pattern": "media.newPlayer",
+            "context_patterns": ["acro", "pdf", "reader"],
+            "cve": "CVE-2009-4324",
+            "description": "Adobe Acrobat Reader media.newPlayer use-after-free",
+            "mitre": "T1203",
+        },
+    ]
+
+    def extract_exploit_signatures(self) -> dict:
+        """Map known exploit function signatures from strings/memory to CVE IDs."""
+        click.echo("  Extracting exploit signatures...")
+
+        events = self.load_all_events()
+
+        # Collect all strings IOC values (including exploit_api type)
+        string_values = []
+        for event in events:
+            event_type = str(event.get("event_type", "")).lower()
+            if "memory_strings_ioc" not in event_type:
+                continue
+            raw = {}
+            try:
+                raw = json.loads(event.get("raw_payload", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            value = raw.get("value", "")
+            context = raw.get("context", "")
+            ioc_type = raw.get("ioc_type", "")
+            if value:
+                string_values.append({"value": value, "context": context, "ioc_type": ioc_type})
+
+        # Check for process context (e.g., AcroRd32.exe present in case)
+        process_names = set()
+        for event in events:
+            pname = event.get("process_name") or ""
+            if pname:
+                process_names.add(pname.lower())
+
+        has_pdf_context = any(
+            x in name for name in process_names
+            for x in ["acro", "reader", "pdf"]
+        ) or any(
+            "pdf" in sv["context"].lower() or "acro" in sv["context"].lower()
+            for sv in string_values
+        )
+
+        matched_cves = []
+        for sig in self.EXPLOIT_SIGNATURES:
+            pattern = sig["pattern"]
+            # Check if the exploit pattern appears in any string value
+            for sv in string_values:
+                if pattern in sv["value"] or pattern in sv["context"]:
+                    # Check context requirements
+                    context_met = not sig["context_patterns"] or has_pdf_context
+                    if context_met:
+                        matched_cves.append({
+                            "cve": sig["cve"],
+                            "description": sig["description"],
+                            "mitre_technique": sig["mitre"],
+                            "matched_pattern": pattern,
+                            "matched_in": sv["value"][:200],
+                            "context": sv["context"][:200],
+                        })
+                        break  # One match per signature is enough
+
+        result = {
+            "exploit_signatures": matched_cves,
+            "exploit_count": len(matched_cves),
+            "pdf_context_detected": has_pdf_context,
+            "total_string_values_checked": len(string_values),
+        }
+
+        self._save_extraction("exploit_signatures.json", result)
+        click.echo(f"    Matched {len(matched_cves)} exploit signatures to CVEs")
+        return result
+
+    # =========================================================================
     # MAIN EXTRACTION RUNNER
     # =========================================================================
     def run_all_extractions(self) -> dict:
-        """Run all 22 extraction categories."""
+        """Run all extraction categories."""
         click.echo("\nRunning ForensicExtractor (22 categories)...")
 
         results = {
@@ -2632,6 +3144,16 @@ class ForensicExtractor:
             # Sprint 4 additions (Deobfuscation & IOC)
             "deobfuscated_content": self.extract_deobfuscated_content(),
             "ioc_paths": self.extract_ioc_paths(),
+            # Defense Evasion Detection
+            "log_tampering": self.detect_log_tampering(),
+            # Memory forensics (from walkthrough gap analysis)
+            "memory_injections": self.extract_memory_injections(),
+            # Memory strings IOC extraction
+            "strings_iocs": self.extract_strings_iocs(),
+            # Carved file hashes from process memory dumps
+            "carved_files": self.extract_carved_files(),
+            # Exploit signature → CVE mapping
+            "exploit_signatures": self.extract_exploit_signatures(),
         }
 
         # Save summary
