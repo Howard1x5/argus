@@ -94,3 +94,13 @@ old-spec/
 
 # Parquet data files
 *.parquet
+
+# Local validation artifacts. These live in the private dev copy
+# (Documents/Projects/local/argus/) and contain absolute local paths and
+# lab IPs. Ignored here so a broad `git add -A` in the public repo can
+# never stage them; the pre-commit hook is the backstop, not the plan.
+EXTRACTION_VALIDATION_RESULTS.md
+PHASE2_CYBERDEFENDERS_VALIDATION.md
+PHASE2_VALIDATION_RESULTS.md
+tests/test_extraction_validation.py
+src/argus/benchmark/
