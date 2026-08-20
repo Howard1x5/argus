@@ -122,15 +122,13 @@ def generate_hypotheses(
     rule_hypotheses = generate_rule_based_hypotheses(findings)
     result["hypotheses"].extend(rule_hypotheses)
     
-    # Step 2: LLM synthesis (if API key available)
-    api_key = api_key or get_api_key("ANTHROPIC_API_KEY")
-    
-    if api_key:
+    # Step 2: LLM synthesis (if a backend is available)
+    from argus.llm_backend import backend_available, call_llm
+
+    llm_ready, _reason = backend_available()
+
+    if llm_ready:
         try:
-            import anthropic
-            
-            client = anthropic.Anthropic(api_key=api_key)
-            
             system_prompt = """You are an expert incident response analyst.
 Based on the triage findings provided, generate attack hypotheses.
 
@@ -169,16 +167,13 @@ Focus on the MOST LIKELY attack scenarios. Don't make up evidence."""
 
 Return your analysis in the specified JSON format."""
             
-            response = client.messages.create(
+            response_text, _token_usage = call_llm(
+                prompt=user_prompt,
+                system=system_prompt,
                 model="claude-sonnet-4-20250514",
                 max_tokens=4096,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
             )
-            
-            # Parse response
-            response_text = response.content[0].text
-            
+
             import re
             json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response_text)
             if json_match:
@@ -201,11 +196,8 @@ Return your analysis in the specified JSON format."""
             result["attack_narrative"] = llm_result.get("attack_narrative", "")
             result["key_questions"] = llm_result.get("key_questions", [])
             
-            result["token_usage"] = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
-            
+            result["token_usage"] = _token_usage
+
         except Exception as e:
             result["llm_error"] = str(e)
     

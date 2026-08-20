@@ -214,15 +214,23 @@ python improvement/runner.py regression
 
 
 def generate_fix_instructions_api(gap_analysis: dict, source_dir: Path) -> str:
-    """Generate fix instructions using Anthropic API.
+    """Generate fix instructions via the active LLM backend.
 
-    This mode calls Claude API to generate detailed fix instructions.
-    Costs ~$0.50 per call.
+    Routes through argus.llm_backend. On the default subscription backend this
+    runs through the `claude` CLI at no metered cost; on ARGUS_LLM_BACKEND=api
+    it bills the Anthropic API (~$0.50 per call).
     """
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
     try:
-        import anthropic
-    except ImportError:
-        return "ERROR: anthropic package not installed. Run: pip install anthropic"
+        from argus.llm_backend import backend_available, call_llm
+    except ImportError as e:
+        return f"ERROR: could not import argus.llm_backend: {e}"
+
+    available, reason = backend_available()
+    if not available:
+        return f"ERROR: no LLM backend available: {reason}"
 
     # Load source files for context
     sources = load_source_files(source_dir)
@@ -256,16 +264,14 @@ Focus on the gaps with type EXTRACTION_GAP, AGENT_GAP, and REPORT_GAP.
 Format your response as a markdown document with numbered fixes.
 """
 
-    client = anthropic.Anthropic()
-
-    response = client.messages.create(
+    response_text, _usage = call_llm(
+        prompt=prompt,
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}]
     )
 
     output = generate_fix_header(gap_analysis)
-    output += response.content[0].text
+    output += response_text
 
     return output
 

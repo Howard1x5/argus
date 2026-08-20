@@ -9,10 +9,31 @@ from argus.config import is_first_run, check_api_keys, get_api_key
 
 
 def check_required_api_key(key_name: str = "anthropic") -> bool:
-    """Check if a required API key is available.
+    """Check that LLM analysis can proceed.
+
+    For 'anthropic' this defers to the active LLM backend: the default
+    subscription backend needs the `claude` CLI rather than an API key, so
+    requiring a key there would block analysis unnecessarily. Other providers
+    still require their key.
 
     Returns True if available, prints warning and returns False if not.
     """
+    if key_name == "anthropic":
+        from argus.llm_backend import backend_available, get_backend
+
+        available, reason = backend_available()
+        if available:
+            return True
+
+        click.echo(click.style(f"\nError: LLM backend unavailable ({reason}).", fg="red"))
+        if get_backend() == "subscription":
+            click.echo("Install Claude Code and sign in, or switch backends with:")
+            click.echo("  ARGUS_LLM_BACKEND=api argus ...\n")
+        else:
+            click.echo("Run 'argus setup' to configure API keys.")
+            click.echo("Then set the environment variable in your shell.\n")
+        return False
+
     if not get_api_key(key_name):
         click.echo(click.style(f"\nError: {key_name} API key not configured.", fg="red"))
         click.echo("Run 'argus setup' to configure API keys.")

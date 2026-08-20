@@ -189,8 +189,10 @@ class LLMDeobfuscator:
         if not self.config.enabled:
             return False
 
-        api_key = os.environ.get(self.config.api_key_env)
-        return bool(api_key)
+        from argus.llm_backend import backend_available
+
+        available, _reason = backend_available()
+        return available
 
     def deobfuscate(self, content: str) -> DeobfuscationResult:
         """Deobfuscate content using LLM.
@@ -222,14 +224,13 @@ class LLMDeobfuscator:
         prompt = DEOBFUSCATION_PROMPT.format(code=truncated)
 
         try:
-            response = self.client.messages.create(
+            from argus.llm_backend import call_llm
+
+            response_text, _usage = call_llm(
+                prompt=prompt,
                 model=self.config.model,
                 max_tokens=self.config.max_output_tokens,
-                messages=[{"role": "user", "content": prompt}],
             )
-
-            # Extract text from response
-            response_text = response.content[0].text
 
             # Parse JSON response
             try:

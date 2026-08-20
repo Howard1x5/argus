@@ -83,10 +83,53 @@ Configuration stored in `~/.argus/`:
 - `cases.log` - Case registry
 - `pattern_library/` - Custom patterns and false positives
 
+## LLM Backends
+
+ARGUS routes every LLM call through `argus.llm_backend`, which supports two paths:
+
+| Backend | How it runs | Cost |
+|---------|-------------|------|
+| `subscription` (default) | Shells out to the `claude` CLI (Claude Code) | No metered API charges |
+| `api` | Anthropic Python SDK | Billed per token against `ANTHROPIC_API_KEY` |
+
+Select a backend with the `ARGUS_LLM_BACKEND` environment variable, or the
+`llm.backend` key in `~/.argus/config.yaml`. The environment variable wins.
+
+```bash
+# Default — no API key needed, uses your Claude subscription
+argus analyze mycase
+
+# Explicitly use the metered API instead
+ARGUS_LLM_BACKEND=api argus analyze mycase
+```
+
+### Notes and limitations
+
+- The subscription backend passes prompts on **stdin**, not argv, so large
+  forensic context (tens of KB) is not subject to `ARG_MAX` limits.
+- It strips `ANTHROPIC_API_KEY` from the subprocess environment before invoking
+  the CLI. Without this the CLI could authenticate against the metered API and
+  silently defeat the point of the backend.
+- Agent tools (`Bash`, `Read`, `Write`, …) are disabled for CLI calls. ARGUS
+  wants a text completion, not an agent acting on the filesystem.
+- Model pins are reduced to a family alias (`sonnet`, `opus`, `haiku`) because
+  the CLI resolves aliases to current versions, whereas a pinned dated model id
+  can be retired.
+- `max_tokens` is honoured by the API backend but **not** by the subscription
+  backend — the CLI does not expose an output-token cap. Long responses are
+  possible; parsing already tolerates this.
+- Rate-limit retry with backoff exists only on the API path. The CLI handles its
+  own throttling.
+- The `usage.reported_cost_usd` field returned by the CLI is informational.
+  Subscription usage is not billed against API credits.
+- Default CLI timeout is 900s, override with `ARGUS_LLM_TIMEOUT`.
+
 ## Requirements
 
 - Python 3.8+
-- Anthropic Claude API key
+- One of:
+  - [Claude Code](https://claude.com/claude-code) installed and signed in (default, no API key required), or
+  - An Anthropic Claude API key for `ARGUS_LLM_BACKEND=api`
 - REMnux (recommended) or Ubuntu/Debian
 
 ## SOC Pipeline Integration -- Implemented

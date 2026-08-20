@@ -208,17 +208,11 @@ def generate_parser_code(
     Returns:
         Generated parser code as string, or None on failure
     """
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError("anthropic package required: pip install anthropic")
+    from argus.llm_backend import backend_available, call_llm
 
-    # Get API key
-    if not api_key:
-        api_key = get_api_key("ANTHROPIC_API_KEY")
-
-    if not api_key:
-        raise ValueError("No Anthropic API key available")
+    available, reason = backend_available()
+    if not available:
+        raise ValueError(f"No LLM backend available: {reason}")
 
     # Sample and analyze file
     sample = sample_file(file_path)
@@ -247,18 +241,13 @@ Focus on:
 4. Appropriate severity levels based on content
 """
 
-    # Call Claude
-    client = anthropic.Anthropic(api_key=api_key)
-
-    response = client.messages.create(
+    # Call Claude through the active backend
+    response_text, _usage = call_llm(
+        prompt=user_prompt,
+        system=SYSTEM_PROMPT,
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
     )
-
-    # Extract response
-    response_text = response.content[0].text
 
     # Parse JSON from response
     json_match = re.search(r"\{[\s\S]*\}", response_text)

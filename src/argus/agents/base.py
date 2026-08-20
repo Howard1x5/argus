@@ -159,55 +159,24 @@ class BaseAgent(ABC):
         return chunks
     
     def call_llm(self, user_prompt: str, max_retries: int = 5) -> tuple[str, dict]:
-        """Make an LLM API call with rate limit handling.
+        """Make an LLM call through the active backend.
+
+        Routes through argus.llm_backend, which defaults to the `claude` CLI
+        (subscription, no metered charges) and falls back to the Anthropic SDK
+        when ARGUS_LLM_BACKEND=api. Rate-limit retry lives in the API path.
 
         Returns:
             Tuple of (response_text, token_usage_dict)
         """
-        import time
-        import re
+        from argus.llm_backend import call_llm as backend_call
 
-        last_error = None
-
-        for attempt in range(max_retries):
-            try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    system=self.get_system_prompt(),
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
-
-                token_usage = {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                }
-
-                return response.content[0].text, token_usage
-
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-
-                # Check if it's a rate limit error
-                if "rate_limit" in error_str.lower() or "429" in error_str:
-                    # Calculate backoff: 60s, 90s, 120s, 150s, 180s
-                    wait_time = 60 + (attempt * 30)
-
-                    # Try to extract retry-after from error message
-                    retry_match = re.search(r'retry.?after[:\s]+(\d+)', error_str, re.I)
-                    if retry_match:
-                        wait_time = int(retry_match.group(1)) + 5
-
-                    if attempt < max_retries - 1:
-                        time.sleep(wait_time)
-                        continue
-
-                # For non-rate-limit errors, don't retry
-                raise
-
-        # If we exhausted retries, raise the last error
-        raise last_error
+        return backend_call(
+            prompt=user_prompt,
+            system=self.get_system_prompt(),
+            model=self.model,
+            max_tokens=self.max_tokens,
+            max_retries=max_retries,
+        )
     
     def parse_json_response(self, response: str) -> dict:
         """Extract JSON from LLM response."""
