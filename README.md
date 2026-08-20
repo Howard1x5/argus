@@ -89,7 +89,9 @@ Configuration stored in `~/.argus/`:
 - Anthropic Claude API key
 - REMnux (recommended) or Ubuntu/Debian
 
-## Roadmap: SOC Pipeline Integration
+## SOC Pipeline Integration -- Implemented
+
+**Status: this stage receives escalations from a real, tested pipeline (stages 1->2 tested against real triage-localLLM code; the ARGUS handoff itself is wired and documented, not yet executed end-to-end -- no real evidence sample committed to this repo to run it against).** [Pipeline code](https://github.com/Howard1x5/triage-localLLM/tree/main/pipeline).
 
 Positioned as the deep-investigation stage of a larger pipeline: cases escalated from [triage-localLLM](https://github.com/Howard1x5/triage-localLLM) (itself fed by [detection-as-code](https://github.com/Howard1x5/detection-as-code)'s detections) land here for full evidence analysis, IOC extraction, and MITRE mapping. See detection-as-code's README for the full pipeline picture.
 
